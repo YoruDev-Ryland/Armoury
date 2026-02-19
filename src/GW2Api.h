@@ -151,4 +151,9 @@ namespace GW2Api
     // Fetch trait definitions for a list of IDs.
     // Traits are selected within specializations; resolved via /v2/traits.
     std::vector<TraitInfo> FetchTraitInfos(const std::vector<int>& ids);
+
+    // Fetch the skill-palette mapping for a profession.
+    // Returns map of palette_id -> api_skill_id.
+    // Requires ?v=latest on the endpoint (no API key needed).
+    std::unordered_map<int,int> FetchProfessionPalette(const std::string& profession);
 }

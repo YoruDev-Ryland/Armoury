@@ -479,6 +479,35 @@ std::vector<GW2Api::StatsInfo> GW2Api::FetchStatsInfos(const std::vector<int>& i
     return out;
 }
 
+std::unordered_map<int,int> GW2Api::FetchProfessionPalette(const std::string& profession)
+{
+    std::unordered_map<int,int> out;
+    if (profession.empty()) return out;
+
+    std::wstring path = L"/v2/professions/" + UrlEncode(profession) + L"?v=latest";
+    std::string resp = ApiGet(path);
+    if (resp.empty()) return out;
+
+    try
+    {
+        json j = json::parse(resp);
+        // skills_by_palette is an array of [palette_id, skill_id] pairs
+        if (j.contains("skills_by_palette") && j["skills_by_palette"].is_array())
+        {
+            for (auto& pair : j["skills_by_palette"])
+            {
+                if (pair.is_array() && pair.size() >= 2 &&
+                    pair[0].is_number() && pair[1].is_number())
+                {
+                    out[pair[0].get<int>()] = pair[1].get<int>();
+                }
+            }
+        }
+    }
+    catch (...) {}
+    return out;
+}
+
 std::vector<GW2Api::TraitInfo> GW2Api::FetchTraitInfos(const std::vector<int>& ids)
 {
     std::vector<TraitInfo> out;

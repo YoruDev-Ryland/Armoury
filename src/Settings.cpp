@@ -35,6 +35,7 @@ void Settings::Load()
         ApiKey       = j.value("ApiKey",       "");
         ShowWindow   = j.value("ShowWindow",   true);
         ShowIcons    = j.value("ShowIcons",    true);
+        ShowOnlyCurrentChar = j.value("ShowOnlyCurrentChar", false);
         WindowWidth  = j.value("WindowWidth",  680);
         WindowHeight = j.value("WindowHeight", 520);
     }
@@ -50,6 +51,7 @@ void Settings::Save() const
     j["ApiKey"]       = ApiKey;
     j["ShowWindow"]   = ShowWindow;
     j["ShowIcons"]    = ShowIcons;
+    j["ShowOnlyCurrentChar"] = ShowOnlyCurrentChar;
     j["WindowWidth"]  = WindowWidth;
     j["WindowHeight"] = WindowHeight;
 

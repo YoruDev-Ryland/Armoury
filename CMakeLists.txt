@@ -47,6 +47,7 @@ set(SOURCES
     src/Shared.cpp
     src/Settings.cpp
     src/GW2Api.cpp
+    src/ChatCode.cpp
     src/TemplateStore.cpp
     src/UI.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/resources.rc

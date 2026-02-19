@@ -2,6 +2,7 @@
 #include "GW2Api.h"
 #include <string>
 #include <vector>
+#include <array>
 #include <unordered_map>
 #include <mutex>
 #include <cstdint>
@@ -27,6 +28,19 @@ namespace TemplateStore
         std::unordered_map<int, std::string> skillNames;
         // Maps trait ID -> trait name
         std::unordered_map<int, std::string> traitNames;
+
+        // ── Chat-code data ────────────────────────────────────────────────────
+        // Ready-to-copy "[&DQ...]" string; empty until generated.
+        std::string chatCode;
+        // Raw palette skill IDs (same ordering as ChatCode::PaletteSlot).
+        uint16_t paletteSkills[10] = {};
+        // Trait choice positions [spec_slot][tier] (1=top,2=mid,3=bot,0=none).
+        uint8_t specTraitChoices[3][3] = {};
+        // Ranger pet IDs [terr1,terr2,aq1,aq2]
+        uint8_t rangerPets[4] = {};
+        // Revenant legend codes [t1,t2,aq1,aq2] and inactive palette skills [6]
+        uint8_t  revenantLegends[4]  = {};
+        uint16_t revenantInactive[6] = {};
 
         int64_t savedAt = 0;      // Unix timestamp (seconds)
 
@@ -88,6 +102,10 @@ namespace TemplateStore
     // Update just the label of a build.
     void RenameBuild(const std::string& id, const std::string& newLabel);
 
+    // Save a build, replacing any existing build with the same label for
+    // the same character (used for "Import All" to avoid duplicates).
+    std::string SaveBuildByLabel(StoredBuildTemplate tmpl);
+
     // ── Equipment templates ───────────────────────────────────────────────────
 
     std::vector<StoredEquipmentTemplate> GetAllEquipment();
@@ -96,6 +114,9 @@ namespace TemplateStore
     std::string SaveEquipment(StoredEquipmentTemplate tmpl);
     void DeleteEquipment(const std::string& id);
     void RenameEquipment(const std::string& id, const std::string& newLabel);
+
+    // Save equipment, replacing any with the same label for the same character.
+    std::string SaveEquipmentByLabel(StoredEquipmentTemplate tmpl);
 
     // ── API resolution cache ──────────────────────────────────────────────────
     // These are saved to disk alongside templates so names survive restarts.
@@ -114,6 +135,18 @@ namespace TemplateStore
 
     // Look up a cached trait name by ID (traits are part of specializations).
     std::string GetTraitName(int id);
+
+    // Look up major traits for a spec by ID.
+    // Returns empty array if not yet cached.
+    std::array<int,9> GetSpecMajorTraits(int specId);
+
+    // Palette-to-API skill ID lookup for a profession.
+    // Returns 0 if not cached or not found.
+    int PaletteToApi(const std::string& profession, int paletteId);
+
+    // API-skill-ID to palette ID lookup for a profession.
+    // Returns 0 if not cached or not found.
+    int ApiToPalette(const std::string& profession, int apiSkillId);
 
     // Queue IDs for background resolution (starts resolve thread if needed).
     void RequestResolve(const std::string& apiKey);

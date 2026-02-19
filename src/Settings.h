@@ -7,6 +7,7 @@ struct Settings
     std::string ApiKey;            // GW2 API key (requires "characters" + "builds")
     bool        ShowWindow  = true;
     bool        ShowIcons   = true;  // Fetch and show skill/item icons
+    bool        ShowOnlyCurrentChar = false; // Only show builds for the logged-in character
     int         WindowWidth  = 680;
     int         WindowHeight = 520;
 

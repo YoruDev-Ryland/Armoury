@@ -193,6 +193,35 @@ namespace
 
     // ---------- Background resolve worker ------------------------------------
 
+    // Try to generate a chat code for a build template.
+    // Must be called with g_Mx held.
+    void TryGenerateChatCode(TemplateStore::StoredBuildTemplate& b)
+    {
+        if (!b.chatCode.empty()) return; // already have one
+
+        // Check if we have palette skills (all zeros means unknown)
+        bool hasPalette = false;
+        for (auto p : b.paletteSkills) if (p) { hasPalette = true; break; }
+        if (!hasPalette) return;
+
+        // Check if we have all spec major traits to derive choices
+        // (if all chosen traits are 0 we still generate but choices will be 0)
+        uint8_t choices[3][3] = {};
+        ChatCode::DeriveChoices(b.rawTab, g_SpecMajorTraits, choices);
+        memcpy(b.specTraitChoices, choices, sizeof(choices));
+
+        const uint8_t* pets    = (b.profession == "Ranger")   ? b.rangerPets      : nullptr;
+        const uint8_t* legs    = (b.profession == "Revenant") ? b.revenantLegends  : nullptr;
+        const uint16_t* inact  = (b.profession == "Revenant") ? b.revenantInactive : nullptr;
+
+        int specIds[3] = {};
+        for (int s = 0; s < 3; ++s) specIds[s] = b.rawTab.specs[s].id;
+
+        b.chatCode = ChatCode::EncodeBuildCode(
+            b.profession, specIds, choices, b.paletteSkills,
+            pets, legs, inact);
+    }
+
     void ResolveWorker(std::string apiKey)
     {
         // Collect all unresolved IDs
@@ -234,7 +263,17 @@ namespace
             auto infos = GW2Api::FetchSpecInfos(
                 std::vector<int>(specIds.begin(), specIds.end()));
             std::lock_guard<std::mutex> lk(g_Mx);
-            for (auto& si : infos) g_SpecNames[si.id] = si.name;
+            for (auto& si : infos)
+            {
+                g_SpecNames[si.id] = si.name;
+                // Cache major traits (9 entries per spec)
+                if (si.majorTraitIds.size() >= 9)
+                {
+                    std::array<int,9> arr{};
+                    for (int i = 0; i < 9; ++i) arr[i] = si.majorTraitIds[i];
+                    g_SpecMajorTraits[si.id] = arr;
+                }
+            }
         }
 
         // Fetch traits
@@ -289,6 +328,74 @@ namespace
             std::lock_guard<std::mutex> lk(g_Mx);
             for (auto& b : g_Builds)    b.resolved = true;
             for (auto& e : g_Equipment) e.resolved = true;
+        }
+
+        // Fetch profession palette maps for any build that still needs a chat code
+        {
+            std::set<std::string> profsNeeded;
+            {
+                std::lock_guard<std::mutex> lk(g_Mx);
+                for (auto& b : g_Builds)
+                    if (b.chatCode.empty() && !b.profession.empty())
+                        profsNeeded.insert(b.profession);
+            }
+
+            for (auto& prof : profsNeeded)
+            {
+                if (g_ResolveStop) break;
+                if (g_ProfPalette.count(prof)) continue; // already cached
+                auto palette = GW2Api::FetchProfessionPalette(prof);
+                std::lock_guard<std::mutex> lk(g_Mx);
+                g_ProfPalette[prof] = std::move(palette);
+            }
+
+            // Now fill in palette skill IDs for builds that have API skill IDs
+            // but no palette IDs yet, then generate chat codes.
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& b : g_Builds)
+            {
+                if (!b.chatCode.empty()) continue;
+                auto pit = g_ProfPalette.find(b.profession);
+                if (pit == g_ProfPalette.end()) continue;
+
+                // Build inverted map: api_skill_id -> palette_id
+                std::unordered_map<int,int> apiToPal;
+                for (auto& [palId, apiId] : pit->second)
+                    apiToPal[apiId] = palId;
+
+                auto mapSkill = [&](int apiId) -> uint16_t {
+                    if (!apiId) return 0;
+                    auto it2 = apiToPal.find(apiId);
+                    return (it2 != apiToPal.end()) ? (uint16_t)it2->second : 0;
+                };
+
+                auto& sk = b.rawTab.skills;
+                b.paletteSkills[0]  = mapSkill(sk.heal);
+                b.paletteSkills[1]  = 0; // aquatic heal unknown
+                b.paletteSkills[2]  = mapSkill(sk.utilities[0]);
+                b.paletteSkills[3]  = 0;
+                b.paletteSkills[4]  = mapSkill(sk.utilities[1]);
+                b.paletteSkills[5]  = 0;
+                b.paletteSkills[6]  = mapSkill(sk.utilities[2]);
+                b.paletteSkills[7]  = 0;
+                b.paletteSkills[8]  = mapSkill(sk.elite);
+                b.paletteSkills[9]  = 0;
+
+                if (b.profession == "Ranger")
+                {
+                    b.rangerPets[0] = (uint8_t)sk.terrestrialPet1;
+                    b.rangerPets[1] = (uint8_t)sk.terrestrialPet2;
+                    b.rangerPets[2] = (uint8_t)sk.aquaticPet1;
+                    b.rangerPets[3] = (uint8_t)sk.aquaticPet2;
+                }
+                if (b.profession == "Revenant")
+                {
+                    b.revenantLegends[0] = (uint8_t)sk.legend1;
+                    b.revenantLegends[1] = (uint8_t)sk.legend2;
+                }
+
+                TryGenerateChatCode(b);
+            }
         }
 
         TemplateStore::Save();
@@ -363,6 +470,16 @@ void TemplateStore::Load()
                 tmpl.savedAt       = jb.value("saved_at",      (int64_t)0);
                 tmpl.resolved      = jb.value("resolved",      false);
                 if (jb.contains("raw_tab")) tmpl.rawTab = DeserialiseBuildTab(jb["raw_tab"]);
+                // Chat-code data
+                tmpl.chatCode = jb.value("chat_code", std::string{});
+                if (jb.contains("palette_skills") && jb["palette_skills"].is_array())
+                    for (int i = 0; i < 10 && i < (int)jb["palette_skills"].size(); ++i)
+                        tmpl.paletteSkills[i] = (uint16_t)jb["palette_skills"][i].get<int>();
+                if (jb.contains("spec_choices") && jb["spec_choices"].is_array())
+                    for (int s = 0; s < 3 && s < (int)jb["spec_choices"].size(); ++s)
+                        if (jb["spec_choices"][s].is_array())
+                            for (int t = 0; t < 3 && t < (int)jb["spec_choices"][s].size(); ++t)
+                                tmpl.specTraitChoices[s][t] = (uint8_t)jb["spec_choices"][s][t].get<int>();
                 g_Builds.push_back(std::move(tmpl));
             }
         }
@@ -421,6 +538,19 @@ void TemplateStore::Save()
         jb["saved_at"]      = b.savedAt;
         jb["resolved"]      = b.resolved;
         jb["raw_tab"]       = SerialiseBuildTab(b.rawTab);
+        // Chat-code data
+        jb["chat_code"]      = b.chatCode;
+        json palArr = json::array();
+        for (auto p : b.paletteSkills) palArr.push_back((int)p);
+        jb["palette_skills"] = palArr;
+        json choicesArr = json::array();
+        for (int s = 0; s < 3; ++s)
+        {
+            json tier = json::array();
+            for (int t = 0; t < 3; ++t) tier.push_back((int)b.specTraitChoices[s][t]);
+            choicesArr.push_back(tier);
+        }
+        jb["spec_choices"] = choicesArr;
         buildsArr.push_back(jb);
     }
     root["builds"] = buildsArr;
@@ -609,6 +739,75 @@ std::string TemplateStore::GetTraitName(int id)
     std::lock_guard<std::mutex> lk(g_Mx);
     auto it = g_TraitNames.find(id);
     return (it != g_TraitNames.end()) ? it->second : "";
+}
+
+std::array<int,9> TemplateStore::GetSpecMajorTraits(int specId)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_SpecMajorTraits.find(specId);
+    if (it != g_SpecMajorTraits.end()) return it->second;
+    return {};
+}
+
+int TemplateStore::PaletteToApi(const std::string& profession, int paletteId)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto pit = g_ProfPalette.find(profession);
+    if (pit == g_ProfPalette.end()) return 0;
+    auto it = pit->second.find(paletteId);
+    return (it != pit->second.end()) ? it->second : 0;
+}
+
+int TemplateStore::ApiToPalette(const std::string& profession, int apiSkillId)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto pit = g_ProfPalette.find(profession);
+    if (pit == g_ProfPalette.end()) return 0;
+    for (auto& [palId, apiId] : pit->second)
+        if (apiId == apiSkillId) return palId;
+    return 0;
+}
+
+std::string TemplateStore::SaveBuildByLabel(StoredBuildTemplate tmpl)
+{
+    // Find existing build with same label + character, replace it
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        for (auto& b : g_Builds)
+        {
+            if (b.characterName == tmpl.characterName && b.label == tmpl.label)
+            {
+                tmpl.id      = b.id;      // reuse old ID
+                tmpl.savedAt = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                b = std::move(tmpl);
+                Save();
+                return b.id;
+            }
+        }
+    }
+    // Not found — use normal save path
+    return SaveBuild(std::move(tmpl));
+}
+
+std::string TemplateStore::SaveEquipmentByLabel(StoredEquipmentTemplate tmpl)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        for (auto& e : g_Equipment)
+        {
+            if (e.characterName == tmpl.characterName && e.label == tmpl.label)
+            {
+                tmpl.id      = e.id;
+                tmpl.savedAt = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                e = std::move(tmpl);
+                Save();
+                return e.id;
+            }
+        }
+    }
+    return SaveEquipment(std::move(tmpl));
 }
 
 void TemplateStore::RequestResolve(const std::string& apiKey)
