@@ -346,10 +346,8 @@ namespace
         ImGui::TextDisabled("Armour & Accessories");
         if (ImGui::BeginTable("equip_armor", 5,
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-            ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
-            ImVec2(0, 195)))
+            ImGuiTableFlags_SizingStretchProp))
         {
-            ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn("Slot",     ImGuiTableColumnFlags_WidthFixed,   90.f);
             ImGui::TableSetupColumn("Item",     ImGuiTableColumnFlags_WidthStretch, 2.f);
             ImGui::TableSetupColumn("Stats",    ImGuiTableColumnFlags_WidthStretch, 1.5f);
