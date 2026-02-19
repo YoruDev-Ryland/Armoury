@@ -1,5 +1,6 @@
 #include "TemplateStore.h"
 #include "GW2Api.h"
+#include "ChatCode.h"
 #include "Shared.h"
 
 #include <nlohmann/json.hpp>
@@ -28,6 +29,12 @@ namespace
     std::unordered_map<int, std::string> g_TraitNames;  // /v2/traits
     std::unordered_map<int, std::string> g_ItemNames;
     std::unordered_map<int, std::string> g_ItemRarities;
+
+    // Chat-code caches
+    // spec ID -> array of 9 major trait IDs ([tier*3+pos])
+    std::unordered_map<int, std::array<int,9>> g_SpecMajorTraits;
+    // profession name -> (palette ID -> API skill ID)
+    std::unordered_map<std::string, std::unordered_map<int,int>> g_ProfPalette;
 
     // Background resolve thread
     std::thread      g_ResolveThread;

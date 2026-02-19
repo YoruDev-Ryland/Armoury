@@ -560,12 +560,15 @@ namespace
                 // Copy button — right-aligned on same row
                 ImGui::SameLine(avail - copyW);
                 bool hasCode = !b.chatCode.empty();
-                if (!hasCode) ImGui::BeginDisabled();
-                if (ImGui::Button("Copy##bc"))
+                if (!hasCode) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
+                if (ImGui::Button("Copy##bc") && hasCode)
                     ImGui::SetClipboardText(b.chatCode.c_str());
-                if (!hasCode) ImGui::EndDisabled();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !hasCode)
-                    ImGui::SetTooltip("Chat code not yet generated.\nWait for background resolution to complete.");
+                if (!hasCode)
+                {
+                    ImGui::PopStyleVar();
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Chat code not yet generated.\nWait for background resolution to complete.");
+                }
 
                 ImGui::PopID();
             }
@@ -911,9 +914,9 @@ namespace
 
                 const std::string charName = ActiveChar();
                 bool canSave = (s_CodeLabelBuf[0] != '\0') && !charName.empty();
-                if (!canSave) ImGui::BeginDisabled();
+                if (!canSave) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
 
-                if (ImGui::Button("Save##save_code"))
+                if (ImGui::Button("Save##save_code") && canSave)
                 {
                     TemplateStore::StoredBuildTemplate tmpl;
                     tmpl.characterName = charName;
@@ -936,7 +939,7 @@ namespace
                     s_ShowImportCode = false;
                 }
 
-                if (!canSave) ImGui::EndDisabled();
+                if (!canSave) ImGui::PopStyleVar();
                 if (!canSave && charName.empty())
                     ImGui::TextDisabled("Select a character first.");
             }
