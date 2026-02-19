@@ -808,7 +808,14 @@ void UI::Render()
         ImGui::SameLine();
 
         // ── Vertical separator ────────────────────────────────────────────────
-        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+        {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float  h = ImGui::GetContentRegionAvail().y;
+            ImGui::GetWindowDrawList()->AddLine(
+                p, ImVec2(p.x, p.y + h),
+                ImGui::GetColorU32(ImGuiCol_Separator));
+            ImGui::Dummy(ImVec2(1.0f, h));
+        }
         ImGui::SameLine();
 
         // ── Right panel ───────────────────────────────────────────────────────

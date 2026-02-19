@@ -150,11 +150,5 @@ namespace GW2Api
 
     // Fetch trait definitions for a list of IDs.
     // Traits are selected within specializations; resolved via /v2/traits.
-    struct TraitInfo
-    {
-        int         id = 0;
-        std::string name;
-        std::string iconUrl;
-    };
     std::vector<TraitInfo> FetchTraitInfos(const std::vector<int>& ids);
 }
