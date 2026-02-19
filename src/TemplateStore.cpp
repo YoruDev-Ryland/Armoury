@@ -1,0 +1,626 @@
+#include "TemplateStore.h"
+#include "GW2Api.h"
+#include "Shared.h"
+
+#include <nlohmann/json.hpp>
+#include <fstream>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <algorithm>
+#include <set>
+#include <windows.h>
+
+using json = nlohmann::json;
+
+// ── Internal state ────────────────────────────────────────────────────────────
+
+namespace
+{
+    std::mutex g_Mx;
+
+    std::vector<TemplateStore::StoredBuildTemplate>     g_Builds;
+    std::vector<TemplateStore::StoredEquipmentTemplate> g_Equipment;
+
+    // Global resolution caches (ID -> string)
+    std::unordered_map<int, std::string> g_SpecNames;
+    std::unordered_map<int, std::string> g_SkillNames;
+    std::unordered_map<int, std::string> g_TraitNames;  // /v2/traits
+    std::unordered_map<int, std::string> g_ItemNames;
+    std::unordered_map<int, std::string> g_ItemRarities;
+
+    // Background resolve thread
+    std::thread      g_ResolveThread;
+    std::atomic_bool g_ResolveStop{false};
+    std::atomic_bool g_ResolvePending{false};
+    std::string      g_ResolveApiKey;
+
+    // Generate a simple unique ID
+    std::string MakeId(const std::string& prefix)
+    {
+        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        return prefix + "_" + std::to_string(now);
+    }
+
+    // ---------- JSON helpers --------------------------------------------------
+
+    json SerialiseSkillBar(const GW2Api::SkillBar& b)
+    {
+        json j;
+        j["heal"]  = b.heal;
+        j["elite"] = b.elite;
+        j["utilities"] = json::array({b.utilities[0], b.utilities[1], b.utilities[2]});
+        j["legend1"] = b.legend1;
+        j["legend2"] = b.legend2;
+        j["terr_pet1"] = b.terrestrialPet1;
+        j["terr_pet2"] = b.terrestrialPet2;
+        j["aq_pet1"]   = b.aquaticPet1;
+        j["aq_pet2"]   = b.aquaticPet2;
+        return j;
+    }
+
+    GW2Api::SkillBar DeserialiseSkillBar(const json& j)
+    {
+        GW2Api::SkillBar b{};
+        if (!j.is_object()) return b;
+        b.heal  = j.value("heal",  0);
+        b.elite = j.value("elite", 0);
+        if (j.contains("utilities") && j["utilities"].is_array())
+        {
+            for (int i = 0; i < 3 && i < (int)j["utilities"].size(); ++i)
+                b.utilities[i] = j["utilities"][i].is_number()
+                                  ? j["utilities"][i].get<int>() : 0;
+        }
+        b.legend1 = j.value("legend1", 0);
+        b.legend2 = j.value("legend2", 0);
+        b.terrestrialPet1 = j.value("terr_pet1", 0);
+        b.terrestrialPet2 = j.value("terr_pet2", 0);
+        b.aquaticPet1     = j.value("aq_pet1",   0);
+        b.aquaticPet2     = j.value("aq_pet2",   0);
+        return b;
+    }
+
+    json SerialiseBuildTab(const GW2Api::BuildTab& t)
+    {
+        json j;
+        j["tab"]        = t.tabNumber;
+        j["is_active"]  = t.isActive;
+        j["build_name"] = t.buildName;
+        j["profession"] = t.profession;
+        json specs = json::array();
+        for (auto& s : t.specs)
+        {
+            json js;
+            js["id"] = s.id;
+            js["traits"] = json::array({s.traits[0], s.traits[1], s.traits[2]});
+            specs.push_back(js);
+        }
+        j["specs"]          = specs;
+        j["skills"]         = SerialiseSkillBar(t.skills);
+        j["aquatic_skills"] = SerialiseSkillBar(t.aquaticSkills);
+        return j;
+    }
+
+    GW2Api::BuildTab DeserialiseBuildTab(const json& j)
+    {
+        GW2Api::BuildTab t{};
+        if (!j.is_object()) return t;
+        t.tabNumber = j.value("tab", 0);
+        t.isActive  = j.value("is_active", false);
+        t.buildName = j.value("build_name", std::string{});
+        t.profession = j.value("profession", std::string{});
+        if (j.contains("specs") && j["specs"].is_array())
+        {
+            int idx = 0;
+            for (auto& js : j["specs"])
+            {
+                if (idx >= 3) break;
+                t.specs[idx].id = js.value("id", 0);
+                if (js.contains("traits") && js["traits"].is_array())
+                    for (int ti = 0; ti < 3 && ti < (int)js["traits"].size(); ++ti)
+                        t.specs[idx].traits[ti] = js["traits"][ti].is_number()
+                                                   ? js["traits"][ti].get<int>() : 0;
+                ++idx;
+            }
+        }
+        if (j.contains("skills"))         t.skills        = DeserialiseSkillBar(j["skills"]);
+        if (j.contains("aquatic_skills")) t.aquaticSkills = DeserialiseSkillBar(j["aquatic_skills"]);
+        return t;
+    }
+
+    json SerialiseEquipTab(const GW2Api::EquipmentTab& t)
+    {
+        json j;
+        j["tab"]       = t.tabNumber;
+        j["is_active"] = t.isActive;
+        j["name"]      = t.tabName;
+        json pieces = json::array();
+        for (auto& p : t.pieces)
+        {
+            json jp;
+            jp["item_id"]  = p.itemId;
+            jp["slot"]     = p.slot;
+            jp["skin_id"]  = p.skinId;
+            jp["stats_id"] = p.statsId;
+            jp["stats_name"] = p.statsName;
+            jp["binding"]  = p.binding;
+            jp["upgrades"] = p.upgradeIds;
+            jp["infusions"] = p.infusionIds;
+            pieces.push_back(jp);
+        }
+        j["pieces"] = pieces;
+        return j;
+    }
+
+    GW2Api::EquipmentTab DeserialiseEquipTab(const json& j)
+    {
+        GW2Api::EquipmentTab t{};
+        if (!j.is_object()) return t;
+        t.tabNumber = j.value("tab", 0);
+        t.isActive  = j.value("is_active", false);
+        t.tabName   = j.value("name", std::string{});
+        if (j.contains("pieces") && j["pieces"].is_array())
+        {
+            for (auto& jp : j["pieces"])
+            {
+                GW2Api::EquipmentPiece p;
+                p.itemId    = jp.value("item_id",  0);
+                p.slot      = jp.value("slot",     std::string{});
+                p.skinId    = jp.value("skin_id",  0);
+                p.statsId   = jp.value("stats_id", 0);
+                p.statsName = jp.value("stats_name", std::string{});
+                p.binding   = jp.value("binding",  std::string{});
+                if (jp.contains("upgrades") && jp["upgrades"].is_array())
+                    for (auto& u : jp["upgrades"]) if (u.is_number()) p.upgradeIds.push_back(u.get<int>());
+                if (jp.contains("infusions") && jp["infusions"].is_array())
+                    for (auto& u : jp["infusions"]) if (u.is_number()) p.infusionIds.push_back(u.get<int>());
+                t.pieces.push_back(std::move(p));
+            }
+        }
+        return t;
+    }
+
+    // ---------- Storage path -------------------------------------------------
+
+    std::string StorePath()
+    {
+        if (!APIDefs || !APIDefs->Paths_GetAddonDirectory) return "";
+        std::string dir = APIDefs->Paths_GetAddonDirectory("Armoury");
+        CreateDirectoryA(dir.c_str(), nullptr);
+        return dir + "\\armoury.json";
+    }
+
+    // ---------- Background resolve worker ------------------------------------
+
+    void ResolveWorker(std::string apiKey)
+    {
+        // Collect all unresolved IDs
+        std::set<int> specIds, skillIds, traitIds, itemIds, statsIds;
+
+        {
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& b : g_Builds)
+            {
+                for (auto& s : b.rawTab.specs)
+                {
+                    if (s.id && !g_SpecNames.count(s.id)) specIds.insert(s.id);
+                    for (int t : s.traits)
+                        if (t && !g_TraitNames.count(t)) traitIds.insert(t);
+                }
+
+                auto addSkill = [&](int id) {
+                    if (id && !g_SkillNames.count(id)) skillIds.insert(id);
+                };
+                addSkill(b.rawTab.skills.heal);
+                addSkill(b.rawTab.skills.elite);
+                for (int u : b.rawTab.skills.utilities) addSkill(u);
+            }
+            for (auto& e : g_Equipment)
+            {
+                for (auto& p : e.rawTab.pieces)
+                {
+                    if (p.itemId && !g_ItemNames.count(p.itemId)) itemIds.insert(p.itemId);
+                    for (int u : p.upgradeIds)   if (u && !g_ItemNames.count(u)) itemIds.insert(u);
+                    for (int inf : p.infusionIds) if (inf && !g_ItemNames.count(inf)) itemIds.insert(inf);
+                    if (p.statsId && p.statsName.empty()) statsIds.insert(p.statsId);
+                }
+            }
+        }
+
+        // Fetch specs
+        if (!specIds.empty() && !g_ResolveStop)
+        {
+            auto infos = GW2Api::FetchSpecInfos(
+                std::vector<int>(specIds.begin(), specIds.end()));
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& si : infos) g_SpecNames[si.id] = si.name;
+        }
+
+        // Fetch traits
+        if (!traitIds.empty() && !g_ResolveStop)
+        {
+            auto infos = GW2Api::FetchTraitInfos(
+                std::vector<int>(traitIds.begin(), traitIds.end()));
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& ti : infos) g_TraitNames[ti.id] = ti.name;
+        }
+
+        // Fetch skills
+        if (!skillIds.empty() && !g_ResolveStop)
+        {
+            auto infos = GW2Api::FetchSkillInfos(
+                std::vector<int>(skillIds.begin(), skillIds.end()));
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& si : infos) g_SkillNames[si.id] = si.name;
+        }
+
+        // Fetch items (upgraded/infusions included)
+        if (!itemIds.empty() && !g_ResolveStop)
+        {
+            auto infos = GW2Api::FetchItemInfos(
+                std::vector<int>(itemIds.begin(), itemIds.end()));
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& ii : infos)
+            {
+                g_ItemNames[ii.id]    = ii.name;
+                g_ItemRarities[ii.id] = ii.rarity;
+            }
+        }
+
+        // Fetch stats that have no name yet
+        if (!statsIds.empty() && !g_ResolveStop)
+        {
+            auto infos = GW2Api::FetchStatsInfos(
+                std::vector<int>(statsIds.begin(), statsIds.end()));
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& si : infos)
+            {
+                // Back-fill statsName in equipment pieces
+                for (auto& e : g_Equipment)
+                    for (auto& p : e.rawTab.pieces)
+                        if (p.statsId == si.id && p.statsName.empty())
+                            p.statsName = si.name;
+            }
+        }
+
+        // Mark all resolved
+        {
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& b : g_Builds)    b.resolved = true;
+            for (auto& e : g_Equipment) e.resolved = true;
+        }
+
+        TemplateStore::Save();
+        g_ResolvePending = false;
+    }
+
+} // anonymous namespace
+
+// ── Exported mutex ────────────────────────────────────────────────────────────
+std::mutex TemplateStore::g_Mutex;
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+void TemplateStore::Init()
+{
+    Load();
+}
+
+void TemplateStore::Shutdown()
+{
+    g_ResolveStop = true;
+    if (g_ResolveThread.joinable())
+        g_ResolveThread.join();
+    Save();
+}
+
+void TemplateStore::Load()
+{
+    std::string path = StorePath();
+    if (path.empty()) return;
+
+    std::ifstream f(path);
+    if (!f.is_open()) return;
+
+    try
+    {
+        json root = json::parse(f);
+
+        std::lock_guard<std::mutex> lk(g_Mx);
+
+        // Global caches
+        if (root.contains("spec_names") && root["spec_names"].is_object())
+            for (auto& [k, v] : root["spec_names"].items())
+                if (v.is_string()) g_SpecNames[std::stoi(k)] = v.get<std::string>();
+
+        if (root.contains("skill_names") && root["skill_names"].is_object())
+            for (auto& [k, v] : root["skill_names"].items())
+                if (v.is_string()) g_SkillNames[std::stoi(k)] = v.get<std::string>();
+
+        if (root.contains("trait_names") && root["trait_names"].is_object())
+            for (auto& [k, v] : root["trait_names"].items())
+                if (v.is_string()) g_TraitNames[std::stoi(k)] = v.get<std::string>();
+
+        if (root.contains("item_names") && root["item_names"].is_object())
+            for (auto& [k, v] : root["item_names"].items())
+                if (v.is_string()) g_ItemNames[std::stoi(k)] = v.get<std::string>();
+
+        if (root.contains("item_rarities") && root["item_rarities"].is_object())
+            for (auto& [k, v] : root["item_rarities"].items())
+                if (v.is_string()) g_ItemRarities[std::stoi(k)] = v.get<std::string>();
+
+        // Build templates
+        if (root.contains("builds") && root["builds"].is_array())
+        {
+            for (auto& jb : root["builds"])
+            {
+                StoredBuildTemplate tmpl;
+                tmpl.id            = jb.value("id",            std::string{});
+                tmpl.label         = jb.value("label",         std::string{});
+                tmpl.characterName = jb.value("character_name", std::string{});
+                tmpl.profession    = jb.value("profession",    std::string{});
+                tmpl.savedAt       = jb.value("saved_at",      (int64_t)0);
+                tmpl.resolved      = jb.value("resolved",      false);
+                if (jb.contains("raw_tab")) tmpl.rawTab = DeserialiseBuildTab(jb["raw_tab"]);
+                g_Builds.push_back(std::move(tmpl));
+            }
+        }
+
+        // Equipment templates
+        if (root.contains("equipment") && root["equipment"].is_array())
+        {
+            for (auto& je : root["equipment"])
+            {
+                StoredEquipmentTemplate tmpl;
+                tmpl.id            = je.value("id",            std::string{});
+                tmpl.label         = je.value("label",         std::string{});
+                tmpl.characterName = je.value("character_name", std::string{});
+                tmpl.profession    = je.value("profession",    std::string{});
+                tmpl.savedAt       = je.value("saved_at",      (int64_t)0);
+                tmpl.resolved      = je.value("resolved",      false);
+                if (je.contains("raw_tab")) tmpl.rawTab = DeserialiseEquipTab(je["raw_tab"]);
+                g_Equipment.push_back(std::move(tmpl));
+            }
+        }
+    }
+    catch (...) {}
+}
+
+void TemplateStore::Save()
+{
+    std::string path = StorePath();
+    if (path.empty()) return;
+
+    json root;
+
+    std::lock_guard<std::mutex> lk(g_Mx);
+
+    // Global caches
+    json specNamesJ, skillNamesJ, traitNamesJ, itemNamesJ, itemRaritiesJ;
+    for (auto& [k, v] : g_SpecNames)    specNamesJ[std::to_string(k)]    = v;
+    for (auto& [k, v] : g_SkillNames)   skillNamesJ[std::to_string(k)]   = v;
+    for (auto& [k, v] : g_TraitNames)   traitNamesJ[std::to_string(k)]   = v;
+    for (auto& [k, v] : g_ItemNames)    itemNamesJ[std::to_string(k)]    = v;
+    for (auto& [k, v] : g_ItemRarities) itemRaritiesJ[std::to_string(k)] = v;
+    root["spec_names"]    = specNamesJ;
+    root["skill_names"]   = skillNamesJ;
+    root["trait_names"]   = traitNamesJ;
+    root["item_names"]    = itemNamesJ;
+    root["item_rarities"] = itemRaritiesJ;
+
+    // Build templates
+    json buildsArr = json::array();
+    for (auto& b : g_Builds)
+    {
+        json jb;
+        jb["id"]            = b.id;
+        jb["label"]         = b.label;
+        jb["character_name"] = b.characterName;
+        jb["profession"]    = b.profession;
+        jb["saved_at"]      = b.savedAt;
+        jb["resolved"]      = b.resolved;
+        jb["raw_tab"]       = SerialiseBuildTab(b.rawTab);
+        buildsArr.push_back(jb);
+    }
+    root["builds"] = buildsArr;
+
+    // Equipment templates
+    json equipArr = json::array();
+    for (auto& e : g_Equipment)
+    {
+        json je;
+        je["id"]            = e.id;
+        je["label"]         = e.label;
+        je["character_name"] = e.characterName;
+        je["profession"]    = e.profession;
+        je["saved_at"]      = e.savedAt;
+        je["resolved"]      = e.resolved;
+        je["raw_tab"]       = SerialiseEquipTab(e.rawTab);
+        equipArr.push_back(je);
+    }
+    root["equipment"] = equipArr;
+
+    std::ofstream f(path);
+    if (f.is_open()) f << root.dump(4);
+}
+
+// ── Build template API ────────────────────────────────────────────────────────
+
+std::vector<TemplateStore::StoredBuildTemplate> TemplateStore::GetAllBuilds()
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    return g_Builds;
+}
+
+std::vector<TemplateStore::StoredBuildTemplate> TemplateStore::GetBuilds(
+    const std::string& characterName)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    std::vector<StoredBuildTemplate> out;
+    for (auto& b : g_Builds)
+        if (b.characterName == characterName) out.push_back(b);
+    return out;
+}
+
+std::string TemplateStore::SaveBuild(StoredBuildTemplate tmpl)
+{
+    if (tmpl.id.empty())
+        tmpl.id = MakeId(tmpl.characterName + "_build");
+
+    if (tmpl.savedAt == 0)
+    {
+        tmpl.savedAt = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        // Replace if same ID exists
+        for (auto& b : g_Builds)
+        {
+            if (b.id == tmpl.id) { b = std::move(tmpl); return b.id; }
+        }
+        g_Builds.push_back(std::move(tmpl));
+    }
+
+    Save();
+    return g_Builds.back().id;
+}
+
+void TemplateStore::DeleteBuild(const std::string& id)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        g_Builds.erase(
+            std::remove_if(g_Builds.begin(), g_Builds.end(),
+                           [&](auto& b){ return b.id == id; }),
+            g_Builds.end());
+    }
+    Save();
+}
+
+void TemplateStore::RenameBuild(const std::string& id, const std::string& newLabel)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        for (auto& b : g_Builds)
+            if (b.id == id) { b.label = newLabel; break; }
+    }
+    Save();
+}
+
+// ── Equipment template API ────────────────────────────────────────────────────
+
+std::vector<TemplateStore::StoredEquipmentTemplate> TemplateStore::GetAllEquipment()
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    return g_Equipment;
+}
+
+std::vector<TemplateStore::StoredEquipmentTemplate> TemplateStore::GetEquipment(
+    const std::string& characterName)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    std::vector<StoredEquipmentTemplate> out;
+    for (auto& e : g_Equipment)
+        if (e.characterName == characterName) out.push_back(e);
+    return out;
+}
+
+std::string TemplateStore::SaveEquipment(StoredEquipmentTemplate tmpl)
+{
+    if (tmpl.id.empty())
+        tmpl.id = MakeId(tmpl.characterName + "_equip");
+
+    if (tmpl.savedAt == 0)
+    {
+        tmpl.savedAt = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        for (auto& e : g_Equipment)
+        {
+            if (e.id == tmpl.id) { e = std::move(tmpl); return e.id; }
+        }
+        g_Equipment.push_back(std::move(tmpl));
+    }
+
+    Save();
+    return g_Equipment.back().id;
+}
+
+void TemplateStore::DeleteEquipment(const std::string& id)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        g_Equipment.erase(
+            std::remove_if(g_Equipment.begin(), g_Equipment.end(),
+                           [&](auto& e){ return e.id == id; }),
+            g_Equipment.end());
+    }
+    Save();
+}
+
+void TemplateStore::RenameEquipment(const std::string& id, const std::string& newLabel)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        for (auto& e : g_Equipment)
+            if (e.id == id) { e.label = newLabel; break; }
+    }
+    Save();
+}
+
+// ── Cache lookups ─────────────────────────────────────────────────────────────
+
+std::string TemplateStore::GetSpecName(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_SpecNames.find(id);
+    return (it != g_SpecNames.end()) ? it->second : "";
+}
+
+std::string TemplateStore::GetSkillName(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_SkillNames.find(id);
+    return (it != g_SkillNames.end()) ? it->second : "";
+}
+
+std::string TemplateStore::GetItemName(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_ItemNames.find(id);
+    return (it != g_ItemNames.end()) ? it->second : "";
+}
+
+std::string TemplateStore::GetItemRarity(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_ItemRarities.find(id);
+    return (it != g_ItemRarities.end()) ? it->second : "";
+}
+
+std::string TemplateStore::GetTraitName(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_TraitNames.find(id);
+    return (it != g_TraitNames.end()) ? it->second : "";
+}
+
+void TemplateStore::RequestResolve(const std::string& apiKey)
+{
+    if (g_ResolvePending.exchange(true)) return;  // already pending
+
+    g_ResolveApiKey = apiKey;
+    g_ResolveStop   = false;
+
+    if (g_ResolveThread.joinable())
+        g_ResolveThread.join();
+
+    g_ResolveThread = std::thread(ResolveWorker, apiKey);
+    g_ResolveThread.detach();   // fire-and-forget (g_ResolvePending tracks it)
+}
