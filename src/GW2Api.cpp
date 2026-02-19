@@ -139,19 +139,29 @@ static bool jbool(const json& j, const char* key, bool def = false)
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
 
+// Skills in build-tab responses are objects {"id": N}, not plain integers.
+// This helper handles both formats.
+static int jskill(const json& v)
+{
+    if (v.is_number()) return v.get<int>();
+    if (v.is_object() && v.contains("id") && v["id"].is_number())
+        return v["id"].get<int>();
+    return 0;
+}
+
 static GW2Api::SkillBar ParseSkillBar(const json& j)
 {
     GW2Api::SkillBar bar{};
     if (!j.is_object()) return bar;
 
-    bar.heal = jint(j, "heal");
-    bar.elite = jint(j, "elite");
+    if (j.contains("heal"))  bar.heal  = jskill(j["heal"]);
+    if (j.contains("elite")) bar.elite = jskill(j["elite"]);
 
     if (j.contains("utilities") && j["utilities"].is_array())
     {
         auto& arr = j["utilities"];
         for (int i = 0; i < 3 && i < (int)arr.size(); ++i)
-            bar.utilities[i] = arr[i].is_number() ? arr[i].get<int>() : 0;
+            bar.utilities[i] = jskill(arr[i]);
     }
 
     // Revenant legends

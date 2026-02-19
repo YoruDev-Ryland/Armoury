@@ -36,6 +36,9 @@ namespace
     // profession name -> (palette ID -> API skill ID)
     std::unordered_map<std::string, std::unordered_map<int,int>> g_ProfPalette;
 
+    // Build ↔ Equipment links: buildId -> equipId
+    std::unordered_map<std::string, std::string> g_Links;
+
     // Background resolve thread
     std::thread      g_ResolveThread;
     std::atomic_bool g_ResolveStop{false};
@@ -464,6 +467,11 @@ void TemplateStore::Load()
             for (auto& [k, v] : root["item_rarities"].items())
                 if (v.is_string()) g_ItemRarities[std::stoi(k)] = v.get<std::string>();
 
+        // Build ↔ Equipment links
+        if (root.contains("links") && root["links"].is_object())
+            for (auto& [k, v] : root["links"].items())
+                if (v.is_string()) g_Links[k] = v.get<std::string>();
+
         // Build templates
         if (root.contains("builds") && root["builds"].is_array())
         {
@@ -578,6 +586,11 @@ void TemplateStore::Save()
     }
     root["equipment"] = equipArr;
 
+    // Build ↔ Equipment links
+    json linksJ = json::object();
+    for (auto& [bid, eid] : g_Links) linksJ[bid] = eid;
+    root["links"] = linksJ;
+
     std::ofstream f(path);
     if (f.is_open()) f << root.dump(4);
 }
@@ -633,6 +646,7 @@ void TemplateStore::DeleteBuild(const std::string& id)
             std::remove_if(g_Builds.begin(), g_Builds.end(),
                            [&](auto& b){ return b.id == id; }),
             g_Builds.end());
+        g_Links.erase(id);
     }
     Save();
 }
@@ -697,6 +711,9 @@ void TemplateStore::DeleteEquipment(const std::string& id)
             std::remove_if(g_Equipment.begin(), g_Equipment.end(),
                            [&](auto& e){ return e.id == id; }),
             g_Equipment.end());
+        // Remove any build link pointing to this equipment
+        for (auto it = g_Links.begin(); it != g_Links.end(); )
+            it = (it->second == id) ? g_Links.erase(it) : std::next(it);
     }
     Save();
 }
@@ -709,6 +726,44 @@ void TemplateStore::RenameEquipment(const std::string& id, const std::string& ne
             if (e.id == id) { e.label = newLabel; break; }
     }
     Save();
+}
+
+// ── Build ↔ Equipment link API ────────────────────────────────────────────────
+
+void TemplateStore::LinkBuildEquip(const std::string& buildId,
+                                   const std::string& equipId)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_Mx);
+        if (equipId.empty())
+        {
+            g_Links.erase(buildId);
+        }
+        else
+        {
+            // Remove any existing inverse link pointing to this equipId
+            for (auto it = g_Links.begin(); it != g_Links.end(); )
+                it = (it->second == equipId && it->first != buildId)
+                     ? g_Links.erase(it) : std::next(it);
+            g_Links[buildId] = equipId;
+        }
+    }
+    Save();
+}
+
+std::string TemplateStore::GetLinkedEquip(const std::string& buildId)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_Links.find(buildId);
+    return (it != g_Links.end()) ? it->second : "";
+}
+
+std::string TemplateStore::GetLinkedBuild(const std::string& equipId)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    for (auto& [bid, eid] : g_Links)
+        if (eid == equipId) return bid;
+    return "";
 }
 
 // ── Cache lookups ─────────────────────────────────────────────────────────────

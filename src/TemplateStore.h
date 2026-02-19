@@ -151,6 +151,18 @@ namespace TemplateStore
     // Queue IDs for background resolution (starts resolve thread if needed).
     void RequestResolve(const std::string& apiKey);
 
+    // ── Build ↔ Equipment links ───────────────────────────────────────────────
+    // Link (or re-link) a build to an equipment set. Pass empty equipId to
+    // remove the link. Each build may only be linked to one equipment, and
+    // each equipment to one build.
+    void LinkBuildEquip(const std::string& buildId, const std::string& equipId);
+
+    // Return the equipment ID linked to this build, or "" if none.
+    std::string GetLinkedEquip(const std::string& buildId);
+
+    // Return the build ID linked to this equipment, or "" if none.
+    std::string GetLinkedBuild(const std::string& equipId);
+
     // Mutex for thread-safe access to store vectors from UI thread.
     extern std::mutex g_Mutex;
 }

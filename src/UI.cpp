@@ -104,6 +104,7 @@ namespace
     // Selected template IDs
     std::string               s_SelectedBuildId;
     std::string               s_SelectedEquipId;
+    bool                      s_LastClickedIsBuild = true; // for rename/delete target
 
     // ── Delete confirmation ───────────────────────────────────────────────────
     bool        s_ShowDeleteBuildConfirm = false;
@@ -139,17 +140,6 @@ namespace
     char        s_CodeLabelBuf[128]       = {};
 
     // Slot helpers
-    bool IsArmorSlot(const std::string& slot)
-    {
-        return slot=="Head"||slot=="Shoulders"||slot=="Chest"||
-               slot=="Hands"||slot=="Legs"||slot=="Feet";
-    }
-    bool IsWeaponSlot(const std::string& slot)
-    {
-        return slot=="WeaponA1"||slot=="WeaponA2"||
-               slot=="WeaponB1"||slot=="WeaponB2";
-    }
-
     // ── Background fetch helpers ──────────────────────────────────────────────
 
     void FetchCharactersAsync()
@@ -291,120 +281,161 @@ namespace
     {
         auto& tab = e.rawTab;
 
+        // Find a piece by its API slot name
+        auto FindPiece = [&](const char* slot) -> const GW2Api::EquipmentPiece*
+        {
+            for (auto& p : tab.pieces) if (p.slot == slot) return &p;
+            return nullptr;
+        };
+
+        // Render an item cell with rarity colour
+        auto ItemCell = [&](int id)
+        {
+            std::string rar = TemplateStore::GetItemRarity(id);
+            if (!rar.empty())
+                ImGui::TextColored(RarityColorV4(rar), "%s", ItemDisplay(id).c_str());
+            else
+                ImGui::TextUnformatted(ItemDisplay(id).c_str());
+        };
+
+        // Render a single text cell — grey dash when empty
+        auto TextCell = [&](const std::string& s)
+        {
+            if (s.empty()) ImGui::TextDisabled("-");
+            else           ImGui::TextUnformatted(s.c_str());
+        };
+
+        // Upgrades helper: returns upgrade name by index (empty string if absent)
+        auto UpgradeName = [&](const GW2Api::EquipmentPiece& p, int idx) -> std::string
+        {
+            if (idx < (int)p.upgradeIds.size()) return ItemDisplay(p.upgradeIds[idx]);
+            return {};
+        };
+
+        // Infusions helper: joined newline string
+        auto InfusionStr = [&](const GW2Api::EquipmentPiece& p) -> std::string
+        {
+            std::string out;
+            for (auto inf : p.infusionIds)
+            {
+                if (!out.empty()) out += "\n";
+                out += ItemDisplay(inf);
+            }
+            return out;
+        };
+
         // ── Armour & Accessories ──────────────────────────────────────────────
+        // GW2 API slot names:  Helm, Shoulders, Coat, Gloves, Leggings, Boots,
+        //                      Backpack, Accessory1, Accessory2, Amulet, Ring1, Ring2
+        struct ArmorRow { const char* apiSlot; const char* label; };
+        constexpr ArmorRow kArmorOrder[] = {
+            {"Helm",       "Head"},
+            {"Shoulders",  "Shoulders"},
+            {"Coat",       "Chest"},
+            {"Gloves",     "Hands"},
+            {"Leggings",   "Legs"},
+            {"Boots",      "Feet"},
+            {"Backpack",   "Back"},
+            {"Accessory1", "Accessory 1"},
+            {"Accessory2", "Accessory 2"},
+            {"Amulet",     "Amulet"},
+            {"Ring1",      "Ring 1"},
+            {"Ring2",      "Ring 2"},
+        };
+
         ImGui::TextDisabled("Armour & Accessories");
-        if (ImGui::BeginTable("equip_armor", 3,
+        if (ImGui::BeginTable("equip_armor", 5,
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
-            ImVec2(0, 180)))
+            ImVec2(0, 195)))
         {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn("Slot",        ImGuiTableColumnFlags_WidthFixed, 90.f);
-            ImGui::TableSetupColumn("Item",        ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("Rune / Stats",ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Slot",     ImGuiTableColumnFlags_WidthFixed,   90.f);
+            ImGui::TableSetupColumn("Item",     ImGuiTableColumnFlags_WidthStretch, 2.f);
+            ImGui::TableSetupColumn("Stats",    ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Rune",     ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Infusion", ImGuiTableColumnFlags_WidthStretch, 1.5f);
             ImGui::TableHeadersRow();
 
-            constexpr const char* kArmorOrder[] = {
-                "Head","Shoulders","Chest","Hands","Legs","Feet","Back",
-                "Accessory1","Accessory2","Amulet","Ring1","Ring2"
-            };
-
-            for (auto& slotName : kArmorOrder)
+            for (auto& row : kArmorOrder)
             {
-                const GW2Api::EquipmentPiece* piece = nullptr;
-                for (auto& p : tab.pieces) if (p.slot==slotName){piece=&p;break;}
+                const GW2Api::EquipmentPiece* piece = FindPiece(row.apiSlot);
                 if (!piece) continue;
-
                 ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TextUnformatted(slotName);
-
-                ImGui::TableSetColumnIndex(1);
-                {
-                    std::string rarity = TemplateStore::GetItemRarity(piece->itemId);
-                    if (!rarity.empty())
-                        ImGui::TextColored(RarityColorV4(rarity), "%s",
-                                           ItemDisplay(piece->itemId).c_str());
-                    else
-                        ImGui::TextUnformatted(ItemDisplay(piece->itemId).c_str());
-                }
-
-                ImGui::TableSetColumnIndex(2);
-                {
-                    std::string col3;
-                    if (!piece->statsName.empty()) col3 = piece->statsName;
-                    for (int uid : piece->upgradeIds)
-                    {
-                        if (!col3.empty()) col3 += "\n";
-                        std::string uname = ItemDisplay(uid);
-                        col3 += IsArmorSlot(slotName) ? "Rune: " + uname : uname;
-                    }
-                    if (col3.empty()) ImGui::TextDisabled("-");
-                    else              ImGui::TextUnformatted(col3.c_str());
-                }
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(row.label);
+                ImGui::TableSetColumnIndex(1); ItemCell(piece->itemId);
+                ImGui::TableSetColumnIndex(2); TextCell(piece->statsName);
+                ImGui::TableSetColumnIndex(3); TextCell(UpgradeName(*piece, 0));
+                ImGui::TableSetColumnIndex(4); TextCell(InfusionStr(*piece));
             }
             ImGui::EndTable();
         }
 
         // ── Weapons ───────────────────────────────────────────────────────────
+        struct WeapRow { const char* apiSlot; const char* label; };
+        constexpr WeapRow kWeapOrder[] = {
+            {"WeaponA1", "Main (set A)"},
+            {"WeaponA2", "Off  (set A)"},
+            {"WeaponB1", "Main (set B)"},
+            {"WeaponB2", "Off  (set B)"},
+        };
+
         ImGui::Spacing();
         ImGui::TextDisabled("Weapons");
-        if (ImGui::BeginTable("equip_weapons", 3,
+        if (ImGui::BeginTable("equip_weapons", 5,
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_SizingStretchProp))
         {
-            ImGui::TableSetupColumn("Slot",          ImGuiTableColumnFlags_WidthFixed, 90.f);
-            ImGui::TableSetupColumn("Item",          ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("Sigil / Stats", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Slot",     ImGuiTableColumnFlags_WidthFixed,   90.f);
+            ImGui::TableSetupColumn("Item",     ImGuiTableColumnFlags_WidthStretch, 2.f);
+            ImGui::TableSetupColumn("Stats",    ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Sigil",    ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Infusion", ImGuiTableColumnFlags_WidthStretch, 1.5f);
             ImGui::TableHeadersRow();
 
-            constexpr const char* kWeapOrder[] = {
-                "WeaponA1","WeaponA2","WeaponB1","WeaponB2"
-            };
-
             bool anyWeapon = false;
-            for (auto& slotName : kWeapOrder)
+            for (auto& row : kWeapOrder)
             {
-                const GW2Api::EquipmentPiece* piece = nullptr;
-                for (auto& p : tab.pieces) if (p.slot==slotName){piece=&p;break;}
+                const GW2Api::EquipmentPiece* piece = FindPiece(row.apiSlot);
                 if (!piece) continue;
                 anyWeapon = true;
+                // Weapons store sigil 1 at index 0; two-handed weapons also have sigil 2 at index 1
+                // Combine both sigils into one cell (newline separated) since the column is "Sigil"
+                std::string sigils = UpgradeName(*piece, 0);
+                std::string s2     = UpgradeName(*piece, 1);
+                if (!s2.empty()) { if(!sigils.empty()) sigils += "\n"; sigils += s2; }
 
                 ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TextUnformatted(slotName);
-
-                ImGui::TableSetColumnIndex(1);
-                {
-                    std::string rarity = TemplateStore::GetItemRarity(piece->itemId);
-                    if (!rarity.empty())
-                        ImGui::TextColored(RarityColorV4(rarity), "%s",
-                                           ItemDisplay(piece->itemId).c_str());
-                    else
-                        ImGui::TextUnformatted(ItemDisplay(piece->itemId).c_str());
-                }
-
-                ImGui::TableSetColumnIndex(2);
-                {
-                    std::string col3;
-                    if (!piece->statsName.empty()) col3 = piece->statsName;
-                    for (int uid : piece->upgradeIds)
-                    {
-                        if (!col3.empty()) col3 += "\n";
-                        col3 += "Sigil: " + ItemDisplay(uid);
-                    }
-                    if (col3.empty()) ImGui::TextDisabled("-");
-                    else              ImGui::TextUnformatted(col3.c_str());
-                }
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(row.label);
+                ImGui::TableSetColumnIndex(1); ItemCell(piece->itemId);
+                ImGui::TableSetColumnIndex(2); TextCell(piece->statsName);
+                ImGui::TableSetColumnIndex(3); TextCell(sigils);
+                ImGui::TableSetColumnIndex(4); TextCell(InfusionStr(*piece));
             }
             if (!anyWeapon)
-            {
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TextDisabled("(none)");
-            }
+            { ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::TextDisabled("(none)"); }
             ImGui::EndTable();
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Combined (linked) build + equipment detail ────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+
+    void DrawCombinedDetail(
+        const TemplateStore::StoredBuildTemplate&     b,
+        const TemplateStore::StoredEquipmentTemplate& e)
+    {
+        std::string bLabel = b.label.empty() ? b.rawTab.buildName : b.label;
+        std::string eLabel = e.label.empty() ? e.rawTab.tabName   : e.label;
+        ImGui::TextColored(ProfessionColor(b.profession), "%s  ->  %s",
+                           bLabel.c_str(), eLabel.c_str());
+        ImGui::Separator();
+        DrawBuildDetail(b);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        DrawEquipDetail(e);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -508,169 +539,195 @@ namespace
             return;
         }
 
-        // ── Combined list (no horizontal scrollbar) ───────────────────────────
         auto builds = TemplateStore::GetBuilds(charName);
         auto equips = TemplateStore::GetEquipment(charName);
 
-        ImGui::BeginChild("##combined_list", ImVec2(0, 200.f), true,
-                          ImGuiWindowFlags_None);
-
-        // — Builds section —
-        ImGui::TextDisabled("Builds");
-        ImGui::Separator();
-
-        if (builds.empty())
+        // ── Side-by-side Equipment | Builds ───────────────────────────────────
+        const float listH = 200.f;
+        if (ImGui::BeginTable("##dual_lists", 2,
+            ImGuiTableFlags_BordersInnerV, ImVec2(0, listH)))
         {
-            ImGui::TextDisabled("  No saved builds. Use 'Import Builds'.");
-        }
-        else
-        {
-            for (auto& b : builds)
+            ImGui::TableSetupColumn("Equipment", ImGuiTableColumnFlags_WidthStretch, 1.f);
+            ImGui::TableSetupColumn("Builds",    ImGuiTableColumnFlags_WidthStretch, 1.f);
+            ImGui::TableNextRow();
+
+            // ── Equipment column ──────────────────────────────────────────────
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("Equipment");
+            ImGui::Separator();
+            ImGui::BeginChild("##equip_col", ImVec2(0, listH - 32.f), false,
+                              ImGuiWindowFlags_None);
+            if (equips.empty())
+                ImGui::TextDisabled("  None. Use 'Import Equipment'.");
+            else for (auto& eq : equips)
+            {
+                ImGui::PushID(eq.id.c_str());
+                bool sel = (eq.id == s_SelectedEquipId);
+                std::string lbl = eq.label.empty() ? eq.rawTab.tabName : eq.label;
+                if (lbl.empty()) lbl = "Equipment";
+
+                std::string linkedBid = TemplateStore::GetLinkedBuild(eq.id);
+                if (!linkedBid.empty())
+                { ImGui::TextColored(ImVec4(0.5f,0.8f,1.f,0.85f), "<>"); ImGui::SameLine(); }
+
+                if (ImGui::Selectable(lbl.c_str(), sel))
+                {
+                    s_SelectedEquipId    = eq.id;
+                    s_LastClickedIsBuild = false;
+                    if (!linkedBid.empty()) s_SelectedBuildId = linkedBid;
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+
+            // ── Builds column ─────────────────────────────────────────────────
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextDisabled("Builds");
+            ImGui::Separator();
+            ImGui::BeginChild("##build_col", ImVec2(0, listH - 32.f), false,
+                              ImGuiWindowFlags_None);
+            if (builds.empty())
+                ImGui::TextDisabled("  None. Use 'Import Builds'.");
+            else for (auto& b : builds)
             {
                 ImGui::PushID(b.id.c_str());
-
                 bool sel = (b.id == s_SelectedBuildId);
-                std::string label = b.label.empty() ? b.rawTab.buildName : b.label;
-                if (label.empty()) label = "Build";
+                std::string lbl = b.label.empty() ? b.rawTab.buildName : b.label;
+                if (lbl.empty()) lbl = "Build";
 
-                const float copyW  = 50.f;
-                const float dotW   = ImGui::CalcTextSize("●").x + ImGui::GetStyle().ItemSpacing.x;
-                const float avail  = ImGui::GetContentRegionAvail().x;
-                const float nameW  = avail - dotW - copyW - ImGui::GetStyle().ItemSpacing.x * 2.f;
+                std::string linkedEid = TemplateStore::GetLinkedEquip(b.id);
+                float linkW = 0.f;
+                if (!linkedEid.empty())
+                {
+                    ImGui::TextColored(ImVec4(0.5f,0.8f,1.f,0.85f), "<>");
+                    ImGui::SameLine();
+                    linkW = ImGui::CalcTextSize("<>").x + ImGui::GetStyle().ItemSpacing.x;
+                }
 
-                // Profession-coloured dot
-                ImGui::TextColored(ProfessionColor(b.profession), "●");
+                ImGui::TextColored(ProfessionColor(b.profession), "*");
                 ImGui::SameLine();
+                const float dotW   = ImGui::CalcTextSize("*").x + ImGui::GetStyle().ItemSpacing.x;
+                const float copyW  = 46.f;
+                const float avail  = ImGui::GetContentRegionAvail().x;
+                const float nameW  = std::max(10.f, avail - linkW - dotW - copyW
+                                              - ImGui::GetStyle().ItemSpacing.x);
 
-                // Selectable name — clipped to avoid causing horizontal scroll
                 ImGui::PushClipRect(
                     ImGui::GetCursorScreenPos(),
                     ImVec2(ImGui::GetCursorScreenPos().x + nameW,
-                           ImGui::GetCursorScreenPos().y + ImGui::GetTextLineHeightWithSpacing()),
-                    true);
-                if (ImGui::Selectable(label.c_str(), sel,
-                                      ImGuiSelectableFlags_None,
-                                      ImVec2(nameW, 0)))
+                           ImGui::GetCursorScreenPos().y +
+                           ImGui::GetTextLineHeightWithSpacing()), true);
+                if (ImGui::Selectable(lbl.c_str(), sel,
+                                      ImGuiSelectableFlags_None, ImVec2(nameW, 0)))
                 {
-                    s_SelectedBuildId = b.id;
-                    s_SelectedEquipId.clear();
+                    s_SelectedBuildId    = b.id;
+                    s_LastClickedIsBuild = true;
+                    if (!linkedEid.empty()) s_SelectedEquipId = linkedEid;
                 }
                 ImGui::PopClipRect();
 
-                // Copy button — right-aligned on same row
                 ImGui::SameLine(avail - copyW);
                 bool hasCode = !b.chatCode.empty();
-                if (!hasCode) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
+                if (!hasCode) ImGui::PushStyleVar(ImGuiStyleVar_Alpha,
+                                                  ImGui::GetStyle().Alpha * 0.4f);
                 if (ImGui::Button("Copy##bc") && hasCode)
                     ImGui::SetClipboardText(b.chatCode.c_str());
                 if (!hasCode)
                 {
                     ImGui::PopStyleVar();
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Chat code not yet generated.\nWait for background resolution to complete.");
+                        ImGui::SetTooltip("Chat code pending resolution.");
                 }
-
                 ImGui::PopID();
             }
+            ImGui::EndChild();
+            ImGui::EndTable();
         }
 
-        ImGui::Spacing();
-
-        // — Equipment section —
-        ImGui::TextDisabled("Equipment");
-        ImGui::Separator();
-
-        if (equips.empty())
+        // ── Controls: Rename / Delete / Link / Unlink ─────────────────────────
         {
-            ImGui::TextDisabled("  No saved equipment. Use 'Import Equipment'.");
-        }
-        else
-        {
-            for (auto& e : equips)
+            std::string selId, selLabel;
+            if (s_LastClickedIsBuild && !s_SelectedBuildId.empty())
+                for (auto& b : builds)
+                    if (b.id == s_SelectedBuildId)
+                    { selId = b.id; selLabel = b.label.empty() ? b.rawTab.buildName : b.label; break; }
+            if (!s_LastClickedIsBuild && !s_SelectedEquipId.empty())
+                for (auto& eq : equips)
+                    if (eq.id == s_SelectedEquipId)
+                    { selId = eq.id; selLabel = eq.label.empty() ? eq.rawTab.tabName : eq.label; break; }
+
+            if (!selId.empty())
             {
-                ImGui::PushID(e.id.c_str());
-
-                bool sel = (e.id == s_SelectedEquipId);
-                std::string label = e.label.empty() ? e.rawTab.tabName : e.label;
-                if (label.empty()) label = "Equipment";
-
-                if (ImGui::Selectable(label.c_str(), sel))
+                ImGui::TextDisabled("%s", selLabel.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Rename##cr"))
                 {
-                    s_SelectedEquipId = e.id;
-                    s_SelectedBuildId.clear();
+                    std::strncpy(s_RenameBuf, selLabel.c_str(), sizeof(s_RenameBuf)-1);
+                    s_RenameTargetId = selId;
+                    if (s_LastClickedIsBuild) s_ShowRenameBuild = true;
+                    else                      s_ShowRenameEquip = true;
                 }
-
-                ImGui::PopID();
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Delete##cd"))
+                {
+                    s_PendingDeleteId    = selId;
+                    s_PendingDeleteLabel = selLabel;
+                    if (s_LastClickedIsBuild) s_ShowDeleteBuildConfirm = true;
+                    else                      s_ShowDeleteEquipConfirm = true;
+                }
+                ImGui::SameLine();
             }
-        }
 
-        ImGui::EndChild();
-
-        // ── Edit controls (below list — safe from accidental clicks) ──────────
-        std::string selLabel;
-        bool isBuildSel = false, isEquipSel = false;
-
-        if (!s_SelectedBuildId.empty())
-        {
-            for (auto& b : builds)
-                if (b.id == s_SelectedBuildId)
-                {
-                    selLabel  = b.label.empty() ? b.rawTab.buildName : b.label;
-                    isBuildSel = true;
-                    break;
-                }
-        }
-        else if (!s_SelectedEquipId.empty())
-        {
-            for (auto& eq : equips)
-                if (eq.id == s_SelectedEquipId)
-                {
-                    selLabel  = eq.label.empty() ? eq.rawTab.tabName : eq.label;
-                    isEquipSel = true;
-                    break;
-                }
-        }
-
-        if (isBuildSel || isEquipSel)
-        {
-            ImGui::TextDisabled("Selected: %s", selLabel.c_str());
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Rename##selrn"))
+            if (!s_SelectedBuildId.empty() && !s_SelectedEquipId.empty())
             {
-                std::strncpy(s_RenameBuf, selLabel.c_str(), sizeof(s_RenameBuf)-1);
-                s_RenameTargetId = isBuildSel ? s_SelectedBuildId : s_SelectedEquipId;
-                if (isBuildSel) s_ShowRenameBuild = true;
-                else            s_ShowRenameEquip = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Delete##seldel"))
-            {
-                s_PendingDeleteId    = isBuildSel ? s_SelectedBuildId : s_SelectedEquipId;
-                s_PendingDeleteLabel = selLabel;
-                if (isBuildSel) s_ShowDeleteBuildConfirm = true;
-                else            s_ShowDeleteEquipConfirm = true;
+                bool linked = (TemplateStore::GetLinkedEquip(s_SelectedBuildId) == s_SelectedEquipId);
+                if (linked)
+                {
+                    ImGui::TextColored(ImVec4(0.5f,0.8f,1.f,1), "linked");
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Unlink"))
+                        TemplateStore::LinkBuildEquip(s_SelectedBuildId, "");
+                }
+                else
+                {
+                    if (ImGui::SmallButton("Link these"))
+                        TemplateStore::LinkBuildEquip(s_SelectedBuildId, s_SelectedEquipId);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Associate the selected build with the selected equipment.");
+                }
             }
         }
 
         ImGui::Separator();
 
-        // ── Detail view ───────────────────────────────────────────────────────
+        // ── Detail pane ───────────────────────────────────────────────────────
         ImGui::BeginChild("##detail_pane", ImVec2(0, 0), false);
+        bool drew = false;
 
         if (!s_SelectedBuildId.empty())
-        {
-            for (auto& b : builds)
-                if (b.id == s_SelectedBuildId) { DrawBuildDetail(b); break; }
-        }
-        else if (!s_SelectedEquipId.empty())
-        {
-            for (auto& eq : equips)
-                if (eq.id == s_SelectedEquipId) { DrawEquipDetail(eq); break; }
-        }
-        else
-        {
+            for (auto& b : builds) if (b.id == s_SelectedBuildId)
+            {
+                std::string eid = TemplateStore::GetLinkedEquip(b.id);
+                if (!eid.empty())
+                    for (auto& eq : equips) if (eq.id == eid)
+                        { DrawCombinedDetail(b, eq); drew = true; break; }
+                if (!drew) { DrawBuildDetail(b); drew = true; }
+                break;
+            }
+
+        if (!drew && !s_SelectedEquipId.empty())
+            for (auto& eq : equips) if (eq.id == s_SelectedEquipId)
+            {
+                std::string bid = TemplateStore::GetLinkedBuild(eq.id);
+                if (!bid.empty())
+                    for (auto& b : builds) if (b.id == bid)
+                        { DrawCombinedDetail(b, eq); drew = true; break; }
+                if (!drew) { DrawEquipDetail(eq); drew = true; }
+                break;
+            }
+
+        if (!drew)
             ImGui::TextDisabled("Select a build or equipment set above to view details.");
-        }
 
         ImGui::EndChild();
     }
