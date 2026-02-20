@@ -14,7 +14,6 @@
 #include <sstream>
 #include <cstring>
 #include <ctime>
-#include <unordered_map>
 #include <unordered_set>
 #include <mutex>
 #include <windows.h>
@@ -95,16 +94,24 @@ static std::string ItemDisplay(int id)
     return "Item #" + std::to_string(id);
 }
 
-// ── Icon disk-cache helpers ────────────────────────────────────────────────────
-// Icons are downloaded once to <addondir>/icons/ and loaded from disk on
-// every subsequent launch — no re-download needed between game sessions.
+// ── Icon cache ────────────────────────────────────────────────────────────────
+//
+// Download thread:   fetches PNG bytes, saves to disk, pushes into s_PendingUploads
+// Render thread:     each frame drains s_PendingUploads via FlushPendingIcons(),
+//                    calls Textures_GetOrCreateFromMemory (D3D11 upload must be
+//                    on the render thread).
+//
+// On subsequent sessions the file already exists → Textures_GetOrCreateFromFile
+// (async one-shot load, also render-thread-safe).
 
-static std::string       s_IconsDir;          // set on first use
-static std::mutex        s_IconMx;
-static std::unordered_map<std::string, std::string>  s_IconPathCache;  // url -> local .png path
-static std::unordered_set<std::string>               s_IconDownloading; // urls in-flight
+struct PendingIcon { std::string url; std::vector<uint8_t> bytes; };
 
-// Return the icons directory, creating it if needed.
+static std::string                   s_IconsDir;
+static std::mutex                    s_IconMx;
+static std::unordered_set<std::string> s_IconDownloading;   // urls in-flight
+static std::vector<PendingIcon>        s_PendingUploads;    // ready for GPU upload
+
+// Return (and lazily create) the icons directory.
 static const std::string& IconsDir()
 {
     if (!s_IconsDir.empty()) return s_IconsDir;
@@ -114,79 +121,84 @@ static const std::string& IconsDir()
     return s_IconsDir;
 }
 
-// Derive a safe local filename from a URL: take everything after the last '/'.
+// Filename for a URL = last path component.
 static std::string IconFilename(const std::string& url)
 {
     size_t pos = url.rfind('/');
     if (pos != std::string::npos && pos + 1 < url.size())
         return url.substr(pos + 1);
-    // Fallback: sanitise the full URL
     std::string s = url;
     for (char& c : s) if (!isalnum((unsigned char)c) && c != '.') c = '_';
     return s + ".png";
 }
 
-// Return a Nexus ImTextureID for the given GW2 render URL.
-// First call triggers a background download+save; subsequent calls (same
-// session OR future sessions) load straight from the cached .png file.
+// Called ONCE PER FRAME from the render thread before any icon draws.
+// Drains s_PendingUploads and uploads each to Nexus.
+static void FlushPendingIcons()
+{
+    if (!APIDefs) return;
+    std::vector<PendingIcon> batch;
+    {
+        std::lock_guard<std::mutex> lk(s_IconMx);
+        batch.swap(s_PendingUploads);
+    }
+    for (auto& pi : batch)
+    {
+        APIDefs->Textures_GetOrCreateFromMemory(
+            pi.url.c_str(),
+            (void*)pi.bytes.data(),
+            (uint64_t)pi.bytes.size());
+    }
+}
+
+// Return an ImTextureID for a GW2 render CDN URL, or nullptr while loading.
 static ImTextureID GetIconTexture(const std::string& url)
 {
     if (url.empty() || !APIDefs) return nullptr;
 
-    // Fast path: already resolved this URL to a local file this session
+    // Already registered and uploaded — fastest path (zero allocations).
+    Texture_t* tex = APIDefs->Textures_Get(url.c_str());
+    if (tex && tex->Resource) return (ImTextureID)tex->Resource;
+
+    const std::string& dir = IconsDir();
+    if (dir.empty()) return nullptr;
+    std::string path = dir + "\\" + IconFilename(url);
+
+    // File on disk from a previous session → ask Nexus to load it (async).
+    // Nexus deduplicates by id, so this is a no-op after the first call.
+    DWORD attr = GetFileAttributesA(path.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES)
+    {
+        tex = APIDefs->Textures_GetOrCreateFromFile(url.c_str(), path.c_str());
+        return (tex && tex->Resource) ? (ImTextureID)tex->Resource : nullptr;
+    }
+
+    // Not on disk — fire a background download.
     {
         std::lock_guard<std::mutex> lk(s_IconMx);
-        auto it = s_IconPathCache.find(url);
-        if (it != s_IconPathCache.end())
-        {
-            Texture_t* tex = APIDefs->Textures_GetOrCreateFromFile(
-                url.c_str(), it->second.c_str());
-            return (tex && tex->Resource) ? (ImTextureID)tex->Resource : nullptr;
-        }
+        if (s_IconDownloading.count(url)) return nullptr;
+        s_IconDownloading.insert(url);
     }
 
-    // Check if the file already exists on disk from a previous session
-    const std::string& dir = IconsDir();
-    if (!dir.empty())
-    {
-        std::string path = dir + "\\" + IconFilename(url);
-        DWORD attr = GetFileAttributesA(path.c_str());
-        if (attr != INVALID_FILE_ATTRIBUTES)
+    std::thread([url, path]{
+        auto bytes = GW2Api::DownloadBytesFromURL(url);
+        if (!bytes.empty())
         {
-            // File exists — register and load
-            std::lock_guard<std::mutex> lk(s_IconMx);
-            s_IconPathCache[url] = path;
-            Texture_t* tex = APIDefs->Textures_GetOrCreateFromFile(
-                url.c_str(), path.c_str());
-            return (tex && tex->Resource) ? (ImTextureID)tex->Resource : nullptr;
-        }
+            // Save to disk for next session.
+            std::ofstream f(path, std::ios::binary);
+            if (f) f.write(reinterpret_cast<const char*>(bytes.data()),
+                           (std::streamsize)bytes.size());
 
-        // Not on disk yet — kick off a download if not already in progress
+            // Queue GPU upload — MUST happen on the render thread (see FlushPendingIcons).
+            std::lock_guard<std::mutex> lk(s_IconMx);
+            s_PendingUploads.push_back({url, std::move(bytes)});
+        }
         {
             std::lock_guard<std::mutex> lk(s_IconMx);
-            if (s_IconDownloading.count(url)) return nullptr; // already downloading
-            s_IconDownloading.insert(url);
+            s_IconDownloading.erase(url);
         }
+    }).detach();
 
-        std::thread([url, path]{
-            auto bytes = GW2Api::DownloadBytesFromURL(url);
-            if (!bytes.empty())
-            {
-                // Write to disk
-                std::ofstream f(path, std::ios::binary);
-                if (f) f.write(reinterpret_cast<const char*>(bytes.data()),
-                               (std::streamsize)bytes.size());
-                f.close();
-                // Register so next frame picks it up
-                std::lock_guard<std::mutex> lk(s_IconMx);
-                s_IconPathCache[url] = path;
-            }
-            {
-                std::lock_guard<std::mutex> lk(s_IconMx);
-                s_IconDownloading.erase(url);
-            }
-        }).detach();
-    }
     return nullptr;
 }
 
@@ -375,90 +387,114 @@ namespace
         ImGui::Separator();
 
         // ── Specialization traitlines ─────────────────────────────────────────
-        // Three spec columns side-by-side.  Each column shows the spec icon +
-        // name header, then a 3×3 grid of major-trait choice cells.
-        // Selected cell is highlighted blue; others are dark.
-        constexpr float kSpecIconSz = 24.f;
+        // Each spec is its own full-width row (stacked vertically):
+        //   [spec icon]  [spec name]
+        //   indent  │  [tier1: 3 icons stacked]  [tier2: 3 icons]  [tier3: 3 icons]
+        // Selected trait = bright + highlight border; unselected = dimmed.
+        constexpr float kSpecIconSz  = 24.f;
+        constexpr float kTraitIconSz = 24.f;   // each trait icon square
+        constexpr float kTierGap     = 8.f;    // horizontal gap between tier columns
+        constexpr float kTraitSpacing = 2.f;   // vertical gap between stacked icons
+
         bool hasAnySpec = false;
         for (int si = 0; si < 3; ++si) if (tab.specs[si].id) { hasAnySpec = true; break; }
 
         if (hasAnySpec)
         {
-            if (ImGui::BeginTable("##spec_tbl", 3,
-                ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame))
+            for (int si = 0; si < 3; ++si)
             {
-                ImGui::TableSetupColumn("##s0", ImGuiTableColumnFlags_WidthStretch, 1.f);
-                ImGui::TableSetupColumn("##s1", ImGuiTableColumnFlags_WidthStretch, 1.f);
-                ImGui::TableSetupColumn("##s2", ImGuiTableColumnFlags_WidthStretch, 1.f);
-                ImGui::TableNextRow();
+                auto& spec = tab.specs[si];
+                if (!spec.id) continue;
 
-                for (int si = 0; si < 3; ++si)
+                ImGui::PushID(si + 5000);
+
+                // ── Spec header: icon + name ──────────────────────────────────
                 {
-                    ImGui::TableSetColumnIndex(si);
-                    auto& spec = tab.specs[si];
-                    if (!spec.id) { ImGui::TextDisabled("  \xe2\x80\x94"); continue; }
-
-                    // Spec header: icon + name
-                    IconImage(TemplateStore::GetSpecIcon(spec.id), kSpecIconSz);
+                    ImTextureID specIco = GetIconTexture(TemplateStore::GetSpecIcon(spec.id));
+                    if (specIco)
+                        ImGui::Image(specIco, ImVec2(kSpecIconSz, kSpecIconSz));
+                    else
+                    {
+                        ImVec2 p = ImGui::GetCursorScreenPos();
+                        ImGui::GetWindowDrawList()->AddRectFilled(
+                            p, ImVec2(p.x + kSpecIconSz, p.y + kSpecIconSz),
+                            IM_COL32(60,60,60,200), 3.f);
+                        ImGui::Dummy(ImVec2(kSpecIconSz, kSpecIconSz));
+                    }
                     ImGui::SameLine();
+                    ImGui::AlignTextToFramePadding();
                     ImGui::TextColored(ProfessionColor(b.profession), "%s",
                                        SpecDisplay(spec.id).c_str());
-
-                    // Trait grid: 3 tiers x 3 choices
-                    auto majorTraits = TemplateStore::GetSpecMajorTraits(spec.id);
-                    float colW   = ImGui::GetContentRegionAvail().x;
-                    float cellSz = std::floor(
-                        (colW - ImGui::GetStyle().ItemSpacing.x * 2.f) / 3.f);
-                    cellSz = std::max(cellSz, 20.f);
-                    ImGui::Spacing();
-
-                    for (int tier = 0; tier < 3; ++tier)
-                    {
-                        for (int choice = 0; choice < 3; ++choice)
-                        {
-                            int  traitId  = majorTraits[tier * 3 + choice];
-                            bool selected = traitId && (traitId == spec.traits[tier]);
-
-                            ImVec4 bgCol = selected
-                                ? ImVec4(0.18f, 0.42f, 0.75f, 1.f)
-                                : ImVec4(0.10f, 0.10f, 0.10f, 1.f);
-                            ImVec4 tint  = selected
-                                ? ImVec4(1.f,   1.f,   1.f,   1.f)
-                                : ImVec4(0.40f, 0.40f, 0.40f, 1.f);
-
-                            ImTextureID icon = traitId
-                                ? GetIconTexture(TemplateStore::GetTraitIcon(traitId))
-                                : nullptr;
-
-                            ImGui::PushID(si * 1000 + tier * 10 + choice);
-                            if (icon)
-                            {
-                                int   fp = selected ? 2 : 0;
-                                float sz = std::max(1.f, cellSz - (float)fp * 2.f);
-                                ImGui::ImageButton(icon, ImVec2(sz, sz),
-                                                   ImVec2(0,0), ImVec2(1,1),
-                                                   fp, bgCol, tint);
-                            }
-                            else
-                            {
-                                ImGui::PushStyleColor(ImGuiCol_Button, bgCol);
-                                ImGui::Button("##tc", ImVec2(cellSz, cellSz));
-                                ImGui::PopStyleColor();
-                            }
-                            if (traitId && ImGui::IsItemHovered())
-                                ImGui::SetTooltip("%s", TraitDisplay(traitId).c_str());
-                            ImGui::PopID();
-                            if (choice < 2) ImGui::SameLine(0.f, 2.f);
-                        }
-                    }
                 }
-                ImGui::EndTable();
+
+                // ── Trait columns ─────────────────────────────────────────────
+                // Three tier-columns, each with 3 small icons stacked vertically.
+                auto majorTraits = TemplateStore::GetSpecMajorTraits(spec.id);
+
+                float indent = kSpecIconSz + ImGui::GetStyle().ItemSpacing.x;
+                ImGui::Indent(indent);
+
+                for (int tier = 0; tier < 3; ++tier)
+                {
+                    if (tier > 0) ImGui::SameLine(0.f, kTierGap);
+
+                    ImGui::BeginGroup();
+                    for (int choice = 0; choice < 3; ++choice)
+                    {
+                        if (choice > 0)
+                        {
+                            // push each icon down by kTraitSpacing manually
+                            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kTraitSpacing);
+                        }
+
+                        int  traitId  = (int)majorTraits.size() > tier * 3 + choice
+                                        ? majorTraits[tier * 3 + choice] : 0;
+                        bool selected = traitId && (traitId == spec.traits[tier]);
+
+                        ImVec4 bg   = selected
+                            ? ImVec4(0.15f, 0.38f, 0.72f, 1.f)
+                            : ImVec4(0.08f, 0.08f, 0.08f, 0.95f);
+                        ImVec4 tint = selected
+                            ? ImVec4(1.f, 1.f, 1.f, 1.f)
+                            : ImVec4(0.38f, 0.38f, 0.38f, 0.90f);
+
+                        ImTextureID ico = traitId
+                            ? GetIconTexture(TemplateStore::GetTraitIcon(traitId))
+                            : nullptr;
+
+                        ImGui::PushID(tier * 10 + choice);
+                        if (ico)
+                        {
+                            int   pad = selected ? 1 : 0;
+                            float isz = kTraitIconSz - (float)pad * 2.f;
+                            ImGui::ImageButton(ico, ImVec2(isz, isz),
+                                               ImVec2(0,0), ImVec2(1,1),
+                                               pad, bg, tint);
+                        }
+                        else
+                        {
+                            ImGui::PushStyleColor(ImGuiCol_Button, bg);
+                            ImGui::Button("##t", ImVec2(kTraitIconSz, kTraitIconSz));
+                            ImGui::PopStyleColor();
+                        }
+                        if (traitId && ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", TraitDisplay(traitId).c_str());
+                        ImGui::PopID();
+                    }
+                    ImGui::EndGroup();
+                }
+
+                ImGui::Unindent(indent);
+                ImGui::PopID();
+
+                if (si < 2) ImGui::Spacing();
             }
             ImGui::Spacing();
         }
 
         // ── Skill bar ─────────────────────────────────────────────────────────
-        // Five slots (Heal / 3×Utility / Elite) with icon + role label + name.
+        // Five skill slots evenly distributed across the full available width.
+        // Sizes recalculate every frame so they adapt to window resizing.
         struct SkillSlot { int id; const char* label; ImVec4 color; };
         SkillSlot slots[5] = {
             { tab.skills.heal,         "Heal",    ImVec4(0.30f,0.78f,0.30f,1.f) },
@@ -468,55 +504,64 @@ namespace
             { tab.skills.elite,        "Elite",   ImVec4(0.85f,0.28f,0.28f,1.f) },
         };
 
-        float avail  = ImGui::GetContentRegionAvail().x;
-        float gapW   = ImGui::GetStyle().ItemSpacing.x;
-        float slotW  = std::floor((avail - gapW * 4.f) / 5.f);
-        float iconSz = std::min(slotW, 52.f);
-
-        for (int i = 0; i < 5; ++i)
         {
-            auto& sl = slots[i];
-            ImGui::PushID(i + 9000);
-            ImGui::BeginGroup();
+            float avail  = ImGui::GetContentRegionAvail().x;
+            float gapW   = ImGui::GetStyle().ItemSpacing.x;
+            // 5 slots with 4 gaps between them
+            float slotW  = std::floor((avail - gapW * 4.f) / 5.f);
+            // Icon fills the slot width but capped so it doesn't become absurd
+            float iconSz = std::min(slotW - 4.f, 52.f);
+            iconSz = std::max(iconSz, 20.f);
 
-            // Role label centred over the slot
-            float lw = ImGui::CalcTextSize(sl.label).x;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
-                                  std::max(0.f, (slotW - lw) * 0.5f));
-            ImGui::TextColored(sl.color, "%s", sl.label);
-
-            // Icon or grey placeholder, centred in slot
-            ImTextureID icon = sl.id
-                ? GetIconTexture(TemplateStore::GetSkillIcon(sl.id)) : nullptr;
-            float iconOff = std::max(0.f, (slotW - iconSz) * 0.5f);
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + iconOff);
-            if (icon)
+            for (int i = 0; i < 5; ++i)
             {
-                ImGui::Image(icon, ImVec2(iconSz, iconSz));
-            }
-            else
-            {
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                ImGui::GetWindowDrawList()->AddRectFilled(
-                    p, ImVec2(p.x + iconSz, p.y + iconSz),
-                    IM_COL32(50, 50, 50, 220), 4.f);
-                ImGui::Dummy(ImVec2(iconSz, iconSz));
-            }
+                auto& sl = slots[i];
+                ImGui::PushID(i + 9000);
+                ImGui::BeginGroup();
 
-            // Skill name centred, wrapped to slot width
-            std::string name = sl.id ? SkillDisplay(sl.id) : "(none)";
-            float nw = ImGui::CalcTextSize(name.c_str()).x;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
-                std::max(0.f, (slotW - std::min(nw, slotW)) * 0.5f));
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + slotW);
-            ImGui::TextUnformatted(name.c_str());
-            ImGui::PopTextWrapPos();
+                // Role label: centred in slot
+                {
+                    float lw = ImGui::CalcTextSize(sl.label).x;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                          std::max(0.f, (slotW - lw) * 0.5f));
+                    ImGui::TextColored(sl.color, "%s", sl.label);
+                }
 
-            ImGui::EndGroup();
-            if (sl.id && ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", SkillDisplay(sl.id).c_str());
-            ImGui::PopID();
-            if (i < 4) ImGui::SameLine(0.f, gapW);
+                // Icon (or grey placeholder): centred in slot
+                {
+                    float iconOff = std::max(0.f, (slotW - iconSz) * 0.5f);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + iconOff);
+                    ImTextureID ico = sl.id
+                        ? GetIconTexture(TemplateStore::GetSkillIcon(sl.id)) : nullptr;
+                    if (ico)
+                        ImGui::Image(ico, ImVec2(iconSz, iconSz));
+                    else
+                    {
+                        ImVec2 p = ImGui::GetCursorScreenPos();
+                        ImGui::GetWindowDrawList()->AddRectFilled(
+                            p, ImVec2(p.x + iconSz, p.y + iconSz),
+                            IM_COL32(50,50,50,220), 4.f);
+                        ImGui::Dummy(ImVec2(iconSz, iconSz));
+                    }
+                }
+
+                // Skill name: centred, word-wrapped to slot width
+                {
+                    std::string name = sl.id ? SkillDisplay(sl.id) : std::string("(none)");
+                    float nw = ImGui::CalcTextSize(name.c_str(), nullptr, false, slotW).x;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                        std::max(0.f, (slotW - std::min(nw, slotW)) * 0.5f));
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + slotW);
+                    ImGui::TextUnformatted(name.c_str());
+                    ImGui::PopTextWrapPos();
+                }
+
+                ImGui::EndGroup();
+                if (sl.id && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", SkillDisplay(sl.id).c_str());
+                ImGui::PopID();
+                if (i < 4) ImGui::SameLine(0.f, gapW);
+            }
         }
 
         if (tab.skills.terrestrialPet1 || tab.skills.terrestrialPet2)
@@ -1352,6 +1397,10 @@ namespace
 
 void UI::Render()
 {
+    // Drain any icons that finished downloading since the last frame.
+    // Must run on the render thread before any Textures_GetOrCreateFromMemory calls.
+    FlushPendingIcons();
+
     if (!g_Settings.ShowWindow) return;
 
     ImGui::SetNextWindowSize(
