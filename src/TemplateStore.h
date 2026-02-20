@@ -140,6 +140,7 @@ namespace TemplateStore
     // Look up major traits for a spec by ID.
     // Returns empty array if not yet cached.
     std::array<int,9> GetSpecMajorTraits(int specId);
+    std::array<int,3> GetSpecMinorTraits(int specId);
 
     // Palette-to-API skill ID lookup for a profession.
     // Returns 0 if not cached or not found.

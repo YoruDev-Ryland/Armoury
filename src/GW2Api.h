@@ -19,6 +19,7 @@ namespace GW2Api
         // Each trait "minor" slot is an ID from the traits array in the spec def.
         // The 9 selectable trait IDs are stored in major_traits, 3 per tier.
         std::vector<int> majorTraitIds; // 9 entries: tier0[0..2], tier1[3..5], tier2[6..8]
+        std::vector<int> minorTraitIds; // 3 entries: tier0, tier1, tier2
     };
 
     struct TraitInfo

@@ -33,6 +33,7 @@ namespace
     // Chat-code caches
     // spec ID -> array of 9 major trait IDs ([tier*3+pos])
     std::unordered_map<int, std::array<int,9>> g_SpecMajorTraits;
+    std::unordered_map<int, std::array<int,3>> g_SpecMinorTraits;
     // profession name -> (palette ID -> API skill ID)
     std::unordered_map<std::string, std::unordered_map<int,int>> g_ProfPalette;
 
@@ -252,13 +253,13 @@ namespace
             {
                 for (auto& s : b.rawTab.specs)
                 {
-                    if (s.id && !g_SpecNames.count(s.id)) specIds.insert(s.id);
+                    if (s.id && (!g_SpecNames.count(s.id) || !g_SpecIcons.count(s.id) || !g_SpecMajorTraits.count(s.id) || !g_SpecMinorTraits.count(s.id))) specIds.insert(s.id);
                     for (int t : s.traits)
-                        if (t && !g_TraitNames.count(t)) traitIds.insert(t);
+                        if (t && (!g_TraitNames.count(t) || !g_TraitIcons.count(t))) traitIds.insert(t);
                 }
 
                 auto addSkill = [&](int id) {
-                    if (id && !g_SkillNames.count(id)) skillIds.insert(id);
+                    if (id && (!g_SkillNames.count(id) || !g_SkillIcons.count(id))) skillIds.insert(id);
                 };
                 addSkill(b.rawTab.skills.heal);
                 addSkill(b.rawTab.skills.elite);
@@ -268,9 +269,9 @@ namespace
             {
                 for (auto& p : e.rawTab.pieces)
                 {
-                    if (p.itemId && !g_ItemNames.count(p.itemId)) itemIds.insert(p.itemId);
-                    for (int u : p.upgradeIds)   if (u && !g_ItemNames.count(u)) itemIds.insert(u);
-                    for (int inf : p.infusionIds) if (inf && !g_ItemNames.count(inf)) itemIds.insert(inf);
+                    if (p.itemId && (!g_ItemNames.count(p.itemId) || !g_ItemIcons.count(p.itemId))) itemIds.insert(p.itemId);
+                    for (int u : p.upgradeIds)   if (u && (!g_ItemNames.count(u) || !g_ItemIcons.count(u))) itemIds.insert(u);
+                    for (int inf : p.infusionIds) if (inf && (!g_ItemNames.count(inf) || !g_ItemIcons.count(inf))) itemIds.insert(inf);
                     if (p.statsId && p.statsName.empty()) statsIds.insert(p.statsId);
                 }
             }
@@ -285,13 +286,26 @@ namespace
             for (auto& si : infos)
             {
                 g_SpecNames[si.id] = si.name;
-                if (!si.iconUrl.empty()) g_SpecIcons[si.id] = si.iconUrl;
+                g_SpecIcons[si.id] = si.iconUrl;
                 // Cache major traits (9 entries per spec)
+                std::array<int,9> majorArr{};
                 if (si.majorTraitIds.size() >= 9)
                 {
-                    std::array<int,9> arr{};
-                    for (int i = 0; i < 9; ++i) arr[i] = si.majorTraitIds[i];
-                    g_SpecMajorTraits[si.id] = arr;
+                    for (int i = 0; i < 9; ++i) majorArr[i] = si.majorTraitIds[i];
+                }
+                g_SpecMajorTraits[si.id] = majorArr;
+
+                // Cache minor traits (3 entries per spec)
+                std::array<int,3> minorArr{};
+                if (si.minorTraitIds.size() >= 3)
+                {
+                    for (int i = 0; i < 3; ++i) minorArr[i] = si.minorTraitIds[i];
+                }
+                g_SpecMinorTraits[si.id] = minorArr;
+                // Also add minor traits to traitIds so their icons get fetched
+                for (int t : si.minorTraitIds)
+                {
+                    if (t && (!g_TraitNames.count(t) || !g_TraitIcons.count(t))) traitIds.insert(t);
                 }
             }
         }
@@ -305,7 +319,7 @@ namespace
             for (auto& ti : infos)
             {
                 g_TraitNames[ti.id] = ti.name;
-                if (!ti.iconUrl.empty()) g_TraitIcons[ti.id] = ti.iconUrl;
+                g_TraitIcons[ti.id] = ti.iconUrl;
             }
         }
 
@@ -318,7 +332,7 @@ namespace
             for (auto& si : infos)
             {
                 g_SkillNames[si.id] = si.name;
-                if (!si.iconUrl.empty()) g_SkillIcons[si.id] = si.iconUrl;
+                g_SkillIcons[si.id] = si.iconUrl;
             }
         }
 
@@ -336,7 +350,7 @@ namespace
                 g_ItemNames[ii.id]    = ii.name;
                 g_ItemRarities[ii.id] = ii.rarity;
                 if (ii.infixUpgradeId) itemInfixId[ii.id] = ii.infixUpgradeId;
-                if (!ii.iconUrl.empty()) g_ItemIcons[ii.id] = ii.iconUrl;
+                g_ItemIcons[ii.id] = ii.iconUrl;
             }
         }
 
@@ -532,6 +546,32 @@ void TemplateStore::Load()
             for (auto& [k, v] : root["item_icons"].items())
                 if (v.is_string()) g_ItemIcons[std::stoi(k)] = v.get<std::string>();
 
+        if (root.contains("spec_major_traits") && root["spec_major_traits"].is_object())
+        {
+            for (auto& [k, v] : root["spec_major_traits"].items())
+            {
+                if (v.is_array() && v.size() >= 9)
+                {
+                    std::array<int,9> arr{};
+                    for (int i = 0; i < 9; ++i) arr[i] = v[i].is_number() ? v[i].get<int>() : 0;
+                    g_SpecMajorTraits[std::stoi(k)] = arr;
+                }
+            }
+        }
+
+        if (root.contains("spec_minor_traits") && root["spec_minor_traits"].is_object())
+        {
+            for (auto& [k, v] : root["spec_minor_traits"].items())
+            {
+                if (v.is_array() && v.size() >= 3)
+                {
+                    std::array<int,3> arr{};
+                    for (int i = 0; i < 3; ++i) arr[i] = v[i].is_number() ? v[i].get<int>() : 0;
+                    g_SpecMinorTraits[std::stoi(k)] = arr;
+                }
+            }
+        }
+
         // Build ↔ Equipment links
         if (root.contains("links") && root["links"].is_object())
             for (auto& [k, v] : root["links"].items())
@@ -616,6 +656,22 @@ void TemplateStore::Save()
     root["skill_icons"] = skillIconsJ;
     root["trait_icons"] = traitIconsJ;
     root["item_icons"]  = itemIconsJ;
+
+    json specMajorTraitsJ, specMinorTraitsJ;
+    for (auto& [k, v] : g_SpecMajorTraits)
+    {
+        json arr = json::array();
+        for (int t : v) arr.push_back(t);
+        specMajorTraitsJ[std::to_string(k)] = arr;
+    }
+    for (auto& [k, v] : g_SpecMinorTraits)
+    {
+        json arr = json::array();
+        for (int t : v) arr.push_back(t);
+        specMinorTraitsJ[std::to_string(k)] = arr;
+    }
+    root["spec_major_traits"] = specMajorTraitsJ;
+    root["spec_minor_traits"] = specMinorTraitsJ;
 
     // Build templates
     json buildsArr = json::array();
@@ -885,6 +941,14 @@ std::array<int,9> TemplateStore::GetSpecMajorTraits(int specId)
     std::lock_guard<std::mutex> lk(g_Mx);
     auto it = g_SpecMajorTraits.find(specId);
     if (it != g_SpecMajorTraits.end()) return it->second;
+    return {};
+}
+
+std::array<int,3> TemplateStore::GetSpecMinorTraits(int specId)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_SpecMinorTraits.find(specId);
+    if (it != g_SpecMinorTraits.end()) return it->second;
     return {};
 }
 

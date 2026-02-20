@@ -428,8 +428,9 @@ namespace
                 }
 
                 // ── Trait columns ─────────────────────────────────────────────
-                // Three tier-columns, each with 3 small icons stacked vertically.
+                // Three tier-columns, each with a minor trait and 3 small icons stacked vertically.
                 auto majorTraits = TemplateStore::GetSpecMajorTraits(spec.id);
+                auto minorTraits = TemplateStore::GetSpecMinorTraits(spec.id);
 
                 float indent = kSpecIconSz + ImGui::GetStyle().ItemSpacing.x;
                 ImGui::Indent(indent);
@@ -438,6 +439,35 @@ namespace
                 {
                     if (tier > 0) ImGui::SameLine(0.f, kTierGap);
 
+                    // 1. Render minor trait
+                    ImGui::BeginGroup();
+                    float minorYOffset = kTraitIconSz + kTraitSpacing;
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + minorYOffset);
+                    
+                    int minorTraitId = minorTraits[tier];
+                    ImTextureID minorIco = minorTraitId
+                        ? GetIconTexture(TemplateStore::GetTraitIcon(minorTraitId))
+                        : nullptr;
+                    
+                    ImGui::PushID(tier * 10 + 9); // 9 for minor
+                    if (minorIco)
+                    {
+                        ImGui::Image(minorIco, ImVec2(kTraitIconSz, kTraitIconSz));
+                    }
+                    else
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.08f, 0.08f, 0.95f));
+                        ImGui::Button("##m", ImVec2(kTraitIconSz, kTraitIconSz));
+                        ImGui::PopStyleColor();
+                    }
+                    if (minorTraitId && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", TraitDisplay(minorTraitId).c_str());
+                    ImGui::PopID();
+                    ImGui::EndGroup();
+
+                    ImGui::SameLine(0.f, kTierGap);
+
+                    // 2. Render major traits
                     ImGui::BeginGroup();
                     for (int choice = 0; choice < 3; ++choice)
                     {

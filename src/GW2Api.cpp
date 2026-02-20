@@ -395,6 +395,10 @@ std::vector<GW2Api::SpecInfo> GW2Api::FetchSpecInfos(const std::vector<int>& ids
                 for (auto& t : js["major_traits"])
                     if (t.is_number()) s.majorTraitIds.push_back(t.get<int>());
 
+            if (js.contains("minor_traits") && js["minor_traits"].is_array())
+                for (auto& t : js["minor_traits"])
+                    if (t.is_number()) s.minorTraitIds.push_back(t.get<int>());
+
             out.push_back(std::move(s));
         }
     }
