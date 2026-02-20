@@ -157,4 +157,7 @@ namespace GW2Api
     // Returns map of palette_id -> api_skill_id.
     // Requires ?v=latest on the endpoint (no API key needed).
     std::unordered_map<int,int> FetchProfessionPalette(const std::string& profession);
+
+    // Return the current GW2 game build number from /v2/build.  0 on failure.
+    int FetchCurrentBuildId();
 }

@@ -558,3 +558,16 @@ std::vector<GW2Api::TraitInfo> GW2Api::FetchTraitInfos(const std::vector<int>& i
     }
     return out;
 }
+
+int GW2Api::FetchCurrentBuildId()
+{
+    std::string resp = ApiGet(L"/v2/build");
+    if (resp.empty()) return 0;
+    try
+    {
+        json j = json::parse(resp);
+        return j.value("id", 0);
+    }
+    catch (...) {}
+    return 0;
+}

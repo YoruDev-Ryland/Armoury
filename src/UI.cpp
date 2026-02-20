@@ -26,7 +26,7 @@ static ImU32 RarityColor(const std::string& rarity)
     if (rarity == "Rare")        return IM_COL32(250, 183,   0, 255);
     if (rarity == "Exotic")      return IM_COL32(200,  96,  10, 255);
     if (rarity == "Ascended")    return IM_COL32(251,  62, 141, 255);
-    if (rarity == "Legendary")   return IM_COL32( 76,  19, 157, 255);
+    if (rarity == "Legendary")   return IM_COL32(172, 105, 255, 255);
     return IM_COL32(200, 200, 200, 255);
 }
 
@@ -88,6 +88,43 @@ static std::string ItemDisplay(int id)
     std::string n = TemplateStore::GetItemName(id);
     if (!n.empty()) return n;
     return "Item #" + std::to_string(id);
+}
+
+// ── Icon texture helpers ──────────────────────────────────────────────────────
+
+// Request (or retrieve) a URL-based texture from Nexus.
+// Returns nullptr while still loading or if URL is empty / APIDefs unavailable.
+static ImTextureID GetIconTexture(const std::string& url)
+{
+    if (url.empty() || !APIDefs) return nullptr;
+    // Split "https://host/path" into remote + endpoint
+    size_t protEnd = url.find("//");
+    if (protEnd == std::string::npos) return nullptr;
+    size_t hostEnd = url.find('/', protEnd + 2);
+    if (hostEnd == std::string::npos) return nullptr;
+    std::string remote   = url.substr(0, hostEnd);
+    std::string endpoint = url.substr(hostEnd);
+    Texture_t* tex = APIDefs->Textures_GetOrCreateFromURL(
+        url.c_str(), remote.c_str(), endpoint.c_str());
+    if (!tex || !tex->Resource) return nullptr;
+    return (ImTextureID)tex->Resource;
+}
+
+// Draw an icon at the given square size, or a grey rounded placeholder.
+static void IconImage(const std::string& url, float size)
+{
+    ImTextureID tex = GetIconTexture(url);
+    if (tex)
+    {
+        ImGui::Image(tex, ImVec2(size, size));
+    }
+    else
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            p, ImVec2(p.x + size, p.y + size), IM_COL32(55, 55, 55, 210), 4.f);
+        ImGui::Dummy(ImVec2(size, size));
+    }
 }
 
 // ── UI state ──────────────────────────────────────────────────────────────────
@@ -212,7 +249,7 @@ namespace
     {
         auto& tab = b.rawTab;
 
-        // Profession + read-only code line
+        // ── Header: profession + chat code ────────────────────────────────────
         ImGui::TextColored(ProfessionColor(b.profession), "%s", b.profession.c_str());
         if (!b.chatCode.empty())
         {
@@ -231,34 +268,176 @@ namespace
             ImGui::TextDisabled("(chat code pending resolution...)");
         }
 
-        ImGui::Separator();
-
-        // Specializations + traits
-        ImGui::TextDisabled("Specializations");
-        for (int si = 0; si < 3; ++si)
+        // ── Save date + GW2 build stamp ───────────────────────────────────────
+        if (b.savedAt > 0 || b.gw2BuildId > 0)
         {
-            auto& spec = tab.specs[si];
-            if (!spec.id) continue;
-
-            ImGui::BulletText("%s", SpecDisplay(spec.id).c_str());
-            ImGui::Indent(16.f);
-            for (int tier = 0; tier < 3; ++tier)
+            if (b.savedAt > 0)
             {
-                if (!spec.traits[tier]) continue;
-                ImGui::TextDisabled("Tier %d: %s", tier+1,
-                                    TraitDisplay(spec.traits[tier]).c_str());
+                std::time_t t = (std::time_t)b.savedAt;
+                char dateBuf[32] = {};
+                std::strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", std::localtime(&t));
+                ImGui::TextDisabled("Saved: %s", dateBuf);
+                if (b.gw2BuildId > 0)
+                { ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine(); }
             }
-            ImGui::Unindent(16.f);
+            if (b.gw2BuildId > 0)
+            {
+                int cur = MumbleLink ? (int)MumbleLink->Context.BuildId : 0;
+                if (cur > 0 && cur != b.gw2BuildId)
+                    ImGui::TextColored(ImVec4(1.f, 0.65f, 0.1f, 1.f),
+                        "GW2 Build #%d  (current: #%d \xe2\x80\x94 may be outdated!)",
+                        b.gw2BuildId, cur);
+                else
+                    ImGui::TextDisabled("GW2 Build #%d", b.gw2BuildId);
+            }
         }
 
-        ImGui::Spacing();
-        ImGui::TextDisabled("Skills");
-        ImGui::Indent(12.f);
-        ImGui::BulletText("Heal:    %s", SkillDisplay(tab.skills.heal).c_str());
-        for (int ui = 0; ui < 3; ++ui)
-            ImGui::BulletText("Utility: %s", SkillDisplay(tab.skills.utilities[ui]).c_str());
-        ImGui::BulletText("Elite:   %s", SkillDisplay(tab.skills.elite).c_str());
-        ImGui::Unindent(12.f);
+        ImGui::Separator();
+
+        // ── Specialization traitlines ─────────────────────────────────────────
+        // Three spec columns side-by-side.  Each column shows the spec icon +
+        // name header, then a 3×3 grid of major-trait choice cells.
+        // Selected cell is highlighted blue; others are dark.
+        constexpr float kSpecIconSz = 24.f;
+        bool hasAnySpec = false;
+        for (int si = 0; si < 3; ++si) if (tab.specs[si].id) { hasAnySpec = true; break; }
+
+        if (hasAnySpec)
+        {
+            if (ImGui::BeginTable("##spec_tbl", 3,
+                ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame))
+            {
+                ImGui::TableSetupColumn("##s0", ImGuiTableColumnFlags_WidthStretch, 1.f);
+                ImGui::TableSetupColumn("##s1", ImGuiTableColumnFlags_WidthStretch, 1.f);
+                ImGui::TableSetupColumn("##s2", ImGuiTableColumnFlags_WidthStretch, 1.f);
+                ImGui::TableNextRow();
+
+                for (int si = 0; si < 3; ++si)
+                {
+                    ImGui::TableSetColumnIndex(si);
+                    auto& spec = tab.specs[si];
+                    if (!spec.id) { ImGui::TextDisabled("  \xe2\x80\x94"); continue; }
+
+                    // Spec header: icon + name
+                    IconImage(TemplateStore::GetSpecIcon(spec.id), kSpecIconSz);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ProfessionColor(b.profession), "%s",
+                                       SpecDisplay(spec.id).c_str());
+
+                    // Trait grid: 3 tiers x 3 choices
+                    auto majorTraits = TemplateStore::GetSpecMajorTraits(spec.id);
+                    float colW   = ImGui::GetContentRegionAvail().x;
+                    float cellSz = std::floor(
+                        (colW - ImGui::GetStyle().ItemSpacing.x * 2.f) / 3.f);
+                    cellSz = std::max(cellSz, 20.f);
+                    ImGui::Spacing();
+
+                    for (int tier = 0; tier < 3; ++tier)
+                    {
+                        for (int choice = 0; choice < 3; ++choice)
+                        {
+                            int  traitId  = majorTraits[tier * 3 + choice];
+                            bool selected = traitId && (traitId == spec.traits[tier]);
+
+                            ImVec4 bgCol = selected
+                                ? ImVec4(0.18f, 0.42f, 0.75f, 1.f)
+                                : ImVec4(0.10f, 0.10f, 0.10f, 1.f);
+                            ImVec4 tint  = selected
+                                ? ImVec4(1.f,   1.f,   1.f,   1.f)
+                                : ImVec4(0.40f, 0.40f, 0.40f, 1.f);
+
+                            ImTextureID icon = traitId
+                                ? GetIconTexture(TemplateStore::GetTraitIcon(traitId))
+                                : nullptr;
+
+                            ImGui::PushID(si * 1000 + tier * 10 + choice);
+                            if (icon)
+                            {
+                                int   fp = selected ? 2 : 0;
+                                float sz = std::max(1.f, cellSz - (float)fp * 2.f);
+                                ImGui::ImageButton(icon, ImVec2(sz, sz),
+                                                   ImVec2(0,0), ImVec2(1,1),
+                                                   fp, bgCol, tint);
+                            }
+                            else
+                            {
+                                ImGui::PushStyleColor(ImGuiCol_Button, bgCol);
+                                ImGui::Button("##tc", ImVec2(cellSz, cellSz));
+                                ImGui::PopStyleColor();
+                            }
+                            if (traitId && ImGui::IsItemHovered())
+                                ImGui::SetTooltip("%s", TraitDisplay(traitId).c_str());
+                            ImGui::PopID();
+                            if (choice < 2) ImGui::SameLine(0.f, 2.f);
+                        }
+                    }
+                }
+                ImGui::EndTable();
+            }
+            ImGui::Spacing();
+        }
+
+        // ── Skill bar ─────────────────────────────────────────────────────────
+        // Five slots (Heal / 3×Utility / Elite) with icon + role label + name.
+        struct SkillSlot { int id; const char* label; ImVec4 color; };
+        SkillSlot slots[5] = {
+            { tab.skills.heal,         "Heal",    ImVec4(0.30f,0.78f,0.30f,1.f) },
+            { tab.skills.utilities[0], "Utility", ImVec4(0.38f,0.58f,0.90f,1.f) },
+            { tab.skills.utilities[1], "Utility", ImVec4(0.38f,0.58f,0.90f,1.f) },
+            { tab.skills.utilities[2], "Utility", ImVec4(0.38f,0.58f,0.90f,1.f) },
+            { tab.skills.elite,        "Elite",   ImVec4(0.85f,0.28f,0.28f,1.f) },
+        };
+
+        float avail  = ImGui::GetContentRegionAvail().x;
+        float gapW   = ImGui::GetStyle().ItemSpacing.x;
+        float slotW  = std::floor((avail - gapW * 4.f) / 5.f);
+        float iconSz = std::min(slotW, 52.f);
+
+        for (int i = 0; i < 5; ++i)
+        {
+            auto& sl = slots[i];
+            ImGui::PushID(i + 9000);
+            ImGui::BeginGroup();
+
+            // Role label centred over the slot
+            float lw = ImGui::CalcTextSize(sl.label).x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                  std::max(0.f, (slotW - lw) * 0.5f));
+            ImGui::TextColored(sl.color, "%s", sl.label);
+
+            // Icon or grey placeholder, centred in slot
+            ImTextureID icon = sl.id
+                ? GetIconTexture(TemplateStore::GetSkillIcon(sl.id)) : nullptr;
+            float iconOff = std::max(0.f, (slotW - iconSz) * 0.5f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + iconOff);
+            if (icon)
+            {
+                ImGui::Image(icon, ImVec2(iconSz, iconSz));
+            }
+            else
+            {
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    p, ImVec2(p.x + iconSz, p.y + iconSz),
+                    IM_COL32(50, 50, 50, 220), 4.f);
+                ImGui::Dummy(ImVec2(iconSz, iconSz));
+            }
+
+            // Skill name centred, wrapped to slot width
+            std::string name = sl.id ? SkillDisplay(sl.id) : "(none)";
+            float nw = ImGui::CalcTextSize(name.c_str()).x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                std::max(0.f, (slotW - std::min(nw, slotW)) * 0.5f));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + slotW);
+            ImGui::TextUnformatted(name.c_str());
+            ImGui::PopTextWrapPos();
+
+            ImGui::EndGroup();
+            if (sl.id && ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", SkillDisplay(sl.id).c_str());
+            ImGui::PopID();
+            if (i < 4) ImGui::SameLine(0.f, gapW);
+        }
 
         if (tab.skills.terrestrialPet1 || tab.skills.terrestrialPet2)
         {
@@ -281,14 +460,14 @@ namespace
     {
         auto& tab = e.rawTab;
 
-        // Find a piece by its API slot name
+        // Find a piece by API slot name
         auto FindPiece = [&](const char* slot) -> const GW2Api::EquipmentPiece*
         {
             for (auto& p : tab.pieces) if (p.slot == slot) return &p;
             return nullptr;
         };
 
-        // Render an item cell with rarity colour
+        // Render item cell with rarity colour
         auto ItemCell = [&](int id)
         {
             std::string rar = TemplateStore::GetItemRarity(id);
@@ -298,35 +477,32 @@ namespace
                 ImGui::TextUnformatted(ItemDisplay(id).c_str());
         };
 
-        // Render a single text cell — grey dash when empty
+        // Render a text cell — grey dash when empty
         auto TextCell = [&](const std::string& s)
         {
             if (s.empty()) ImGui::TextDisabled("-");
             else           ImGui::TextUnformatted(s.c_str());
         };
 
-        // Upgrades helper: returns upgrade name by index (empty string if absent)
+        // Upgrade name by index; empty if absent
         auto UpgradeName = [&](const GW2Api::EquipmentPiece& p, int idx) -> std::string
         {
             if (idx < (int)p.upgradeIds.size()) return ItemDisplay(p.upgradeIds[idx]);
             return {};
         };
 
-        // Infusions helper: joined newline string
+        // Infusions: newline-joined string
         auto InfusionStr = [&](const GW2Api::EquipmentPiece& p) -> std::string
         {
             std::string out;
             for (auto inf : p.infusionIds)
-            {
-                if (!out.empty()) out += "\n";
-                out += ItemDisplay(inf);
-            }
+            { if (!out.empty()) out += "\n"; out += ItemDisplay(inf); }
             return out;
         };
 
         // ── Armour & Accessories ──────────────────────────────────────────────
-        // GW2 API slot names:  Helm, Shoulders, Coat, Gloves, Leggings, Boots,
-        //                      Backpack, Accessory1, Accessory2, Amulet, Ring1, Ring2
+        // GW2 API slot names: Helm, Shoulders, Coat, Gloves, Leggings, Boots,
+        //                     Backpack, Accessory1/2, Amulet, Ring1/2
         struct ArmorRow { const char* apiSlot; const char* label; };
         constexpr ArmorRow kArmorOrder[] = {
             {"Helm",       "Head"},
@@ -344,15 +520,16 @@ namespace
         };
 
         ImGui::TextDisabled("Armour & Accessories");
-        if (ImGui::BeginTable("equip_armor", 5,
+        if (ImGui::BeginTable("equip_armor", 6,
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_SizingStretchProp))
         {
-            ImGui::TableSetupColumn("Slot",     ImGuiTableColumnFlags_WidthFixed,   90.f);
-            ImGui::TableSetupColumn("Item",     ImGuiTableColumnFlags_WidthStretch, 2.f);
-            ImGui::TableSetupColumn("Stats",    ImGuiTableColumnFlags_WidthStretch, 1.5f);
-            ImGui::TableSetupColumn("Rune",     ImGuiTableColumnFlags_WidthStretch, 1.5f);
-            ImGui::TableSetupColumn("Infusion", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("##ic",   ImGuiTableColumnFlags_WidthFixed,   30.f);
+            ImGui::TableSetupColumn("Slot",   ImGuiTableColumnFlags_WidthFixed,   90.f);
+            ImGui::TableSetupColumn("Item",   ImGuiTableColumnFlags_WidthStretch, 2.f);
+            ImGui::TableSetupColumn("Stats",  ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Rune",   ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Infusion",ImGuiTableColumnFlags_WidthStretch,1.5f);
             ImGui::TableHeadersRow();
 
             for (auto& row : kArmorOrder)
@@ -360,11 +537,13 @@ namespace
                 const GW2Api::EquipmentPiece* piece = FindPiece(row.apiSlot);
                 if (!piece) continue;
                 ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(row.label);
-                ImGui::TableSetColumnIndex(1); ItemCell(piece->itemId);
-                ImGui::TableSetColumnIndex(2); TextCell(piece->statsName);
-                ImGui::TableSetColumnIndex(3); TextCell(UpgradeName(*piece, 0));
-                ImGui::TableSetColumnIndex(4); TextCell(InfusionStr(*piece));
+                ImGui::TableSetColumnIndex(0);
+                IconImage(TemplateStore::GetItemIcon(piece->itemId), 26.f);
+                ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(row.label);
+                ImGui::TableSetColumnIndex(2); ItemCell(piece->itemId);
+                ImGui::TableSetColumnIndex(3); TextCell(piece->statsName);
+                ImGui::TableSetColumnIndex(4); TextCell(UpgradeName(*piece, 0));
+                ImGui::TableSetColumnIndex(5); TextCell(InfusionStr(*piece));
             }
             ImGui::EndTable();
         }
@@ -380,15 +559,16 @@ namespace
 
         ImGui::Spacing();
         ImGui::TextDisabled("Weapons");
-        if (ImGui::BeginTable("equip_weapons", 5,
+        if (ImGui::BeginTable("equip_weapons", 6,
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_SizingStretchProp))
         {
-            ImGui::TableSetupColumn("Slot",     ImGuiTableColumnFlags_WidthFixed,   90.f);
-            ImGui::TableSetupColumn("Item",     ImGuiTableColumnFlags_WidthStretch, 2.f);
-            ImGui::TableSetupColumn("Stats",    ImGuiTableColumnFlags_WidthStretch, 1.5f);
-            ImGui::TableSetupColumn("Sigil",    ImGuiTableColumnFlags_WidthStretch, 1.5f);
-            ImGui::TableSetupColumn("Infusion", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("##ic",    ImGuiTableColumnFlags_WidthFixed,   30.f);
+            ImGui::TableSetupColumn("Slot",    ImGuiTableColumnFlags_WidthFixed,   90.f);
+            ImGui::TableSetupColumn("Item",    ImGuiTableColumnFlags_WidthStretch, 2.f);
+            ImGui::TableSetupColumn("Stats",   ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Sigil",   ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Infusion",ImGuiTableColumnFlags_WidthStretch, 1.5f);
             ImGui::TableHeadersRow();
 
             bool anyWeapon = false;
@@ -397,21 +577,22 @@ namespace
                 const GW2Api::EquipmentPiece* piece = FindPiece(row.apiSlot);
                 if (!piece) continue;
                 anyWeapon = true;
-                // Weapons store sigil 1 at index 0; two-handed weapons also have sigil 2 at index 1
-                // Combine both sigils into one cell (newline separated) since the column is "Sigil"
+                // Two-handed weapons have sigil 1 at index 0 and sigil 2 at index 1
                 std::string sigils = UpgradeName(*piece, 0);
                 std::string s2     = UpgradeName(*piece, 1);
-                if (!s2.empty()) { if(!sigils.empty()) sigils += "\n"; sigils += s2; }
+                if (!s2.empty()) { if (!sigils.empty()) sigils += "\n"; sigils += s2; }
 
                 ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(row.label);
-                ImGui::TableSetColumnIndex(1); ItemCell(piece->itemId);
-                ImGui::TableSetColumnIndex(2); TextCell(piece->statsName);
-                ImGui::TableSetColumnIndex(3); TextCell(sigils);
-                ImGui::TableSetColumnIndex(4); TextCell(InfusionStr(*piece));
+                ImGui::TableSetColumnIndex(0);
+                IconImage(TemplateStore::GetItemIcon(piece->itemId), 26.f);
+                ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(row.label);
+                ImGui::TableSetColumnIndex(2); ItemCell(piece->itemId);
+                ImGui::TableSetColumnIndex(3); TextCell(piece->statsName);
+                ImGui::TableSetColumnIndex(4); TextCell(sigils);
+                ImGui::TableSetColumnIndex(5); TextCell(InfusionStr(*piece));
             }
             if (!anyWeapon)
-            { ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::TextDisabled("(none)"); }
+            { ImGui::TableNextRow(); ImGui::TableSetColumnIndex(1); ImGui::TextDisabled("(none)"); }
             ImGui::EndTable();
         }
     }
@@ -776,6 +957,7 @@ namespace
                         tmpl.label         = tab.buildName.empty()
                                              ? "Tab " + std::to_string(tab.tabNumber)
                                              : tab.buildName;
+                        tmpl.gw2BuildId    = MumbleLink ? (int)MumbleLink->Context.BuildId : 0;
                         s_SelectedBuildId  = TemplateStore::SaveBuildByLabel(std::move(tmpl));
                     }
                     TemplateStore::RequestResolve(g_Settings.ApiKey);
@@ -803,6 +985,7 @@ namespace
                         tmpl.label         = tab.buildName.empty()
                                              ? "Tab " + std::to_string(tab.tabNumber)
                                              : tab.buildName;
+                        tmpl.gw2BuildId    = MumbleLink ? (int)MumbleLink->Context.BuildId : 0;
                         s_SelectedBuildId  = TemplateStore::SaveBuild(std::move(tmpl));
                         TemplateStore::RequestResolve(g_Settings.ApiKey);
                     }
@@ -994,6 +1177,7 @@ namespace
                     for (int i=0;i<3;i++) tmpl.rawTab.specs[i].id = s_ParsedSpecIds[i];
                     for (int i=0;i<10;i++) tmpl.paletteSkills[i]  = s_ParsedPaletteSkills[i];
                     for (int i=0;i<3;i++) for (int j=0;j<3;j++) tmpl.specTraitChoices[i][j] = s_ParsedSpecChoices[i][j];
+                    tmpl.gw2BuildId = MumbleLink ? (int)MumbleLink->Context.BuildId : 0;
 
                     s_SelectedBuildId = TemplateStore::SaveBuildByLabel(std::move(tmpl));
                     TemplateStore::RequestResolve(g_Settings.ApiKey);

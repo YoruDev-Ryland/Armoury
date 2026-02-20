@@ -39,6 +39,15 @@ namespace
     // Build ↔ Equipment links: buildId -> equipId
     std::unordered_map<std::string, std::string> g_Links;
 
+    // Icon URL caches (ID -> render URL)
+    std::unordered_map<int, std::string> g_SpecIcons;
+    std::unordered_map<int, std::string> g_SkillIcons;
+    std::unordered_map<int, std::string> g_TraitIcons;
+    std::unordered_map<int, std::string> g_ItemIcons;
+
+    // Current GW2 build number (fetched from /v2/build during resolve)
+    int g_CurrentGW2Build = 0;
+
     // Background resolve thread
     std::thread      g_ResolveThread;
     std::atomic_bool g_ResolveStop{false};
@@ -276,6 +285,7 @@ namespace
             for (auto& si : infos)
             {
                 g_SpecNames[si.id] = si.name;
+                if (!si.iconUrl.empty()) g_SpecIcons[si.id] = si.iconUrl;
                 // Cache major traits (9 entries per spec)
                 if (si.majorTraitIds.size() >= 9)
                 {
@@ -292,7 +302,11 @@ namespace
             auto infos = GW2Api::FetchTraitInfos(
                 std::vector<int>(traitIds.begin(), traitIds.end()));
             std::lock_guard<std::mutex> lk(g_Mx);
-            for (auto& ti : infos) g_TraitNames[ti.id] = ti.name;
+            for (auto& ti : infos)
+            {
+                g_TraitNames[ti.id] = ti.name;
+                if (!ti.iconUrl.empty()) g_TraitIcons[ti.id] = ti.iconUrl;
+            }
         }
 
         // Fetch skills
@@ -301,7 +315,11 @@ namespace
             auto infos = GW2Api::FetchSkillInfos(
                 std::vector<int>(skillIds.begin(), skillIds.end()));
             std::lock_guard<std::mutex> lk(g_Mx);
-            for (auto& si : infos) g_SkillNames[si.id] = si.name;
+            for (auto& si : infos)
+            {
+                g_SkillNames[si.id] = si.name;
+                if (!si.iconUrl.empty()) g_SkillIcons[si.id] = si.iconUrl;
+            }
         }
 
         // Fetch items (upgrades/infusions/main pieces included)
@@ -318,6 +336,7 @@ namespace
                 g_ItemNames[ii.id]    = ii.name;
                 g_ItemRarities[ii.id] = ii.rarity;
                 if (ii.infixUpgradeId) itemInfixId[ii.id] = ii.infixUpgradeId;
+                if (!ii.iconUrl.empty()) g_ItemIcons[ii.id] = ii.iconUrl;
             }
         }
 
@@ -361,6 +380,13 @@ namespace
             std::lock_guard<std::mutex> lk(g_Mx);
             for (auto& b : g_Builds)    b.resolved = true;
             for (auto& e : g_Equipment) e.resolved = true;
+        }
+
+        // Fetch current GW2 build ID (no key needed)
+        if (!g_ResolveStop)
+        {
+            int bid = GW2Api::FetchCurrentBuildId();
+            if (bid > 0) g_CurrentGW2Build = bid;
         }
 
         // Fetch profession palette maps for any build that still needs a chat code
@@ -490,6 +516,22 @@ void TemplateStore::Load()
             for (auto& [k, v] : root["item_rarities"].items())
                 if (v.is_string()) g_ItemRarities[std::stoi(k)] = v.get<std::string>();
 
+        if (root.contains("spec_icons") && root["spec_icons"].is_object())
+            for (auto& [k, v] : root["spec_icons"].items())
+                if (v.is_string()) g_SpecIcons[std::stoi(k)] = v.get<std::string>();
+
+        if (root.contains("skill_icons") && root["skill_icons"].is_object())
+            for (auto& [k, v] : root["skill_icons"].items())
+                if (v.is_string()) g_SkillIcons[std::stoi(k)] = v.get<std::string>();
+
+        if (root.contains("trait_icons") && root["trait_icons"].is_object())
+            for (auto& [k, v] : root["trait_icons"].items())
+                if (v.is_string()) g_TraitIcons[std::stoi(k)] = v.get<std::string>();
+
+        if (root.contains("item_icons") && root["item_icons"].is_object())
+            for (auto& [k, v] : root["item_icons"].items())
+                if (v.is_string()) g_ItemIcons[std::stoi(k)] = v.get<std::string>();
+
         // Build ↔ Equipment links
         if (root.contains("links") && root["links"].is_object())
             for (auto& [k, v] : root["links"].items())
@@ -506,6 +548,7 @@ void TemplateStore::Load()
                 tmpl.characterName = jb.value("character_name", std::string{});
                 tmpl.profession    = jb.value("profession",    std::string{});
                 tmpl.savedAt       = jb.value("saved_at",      (int64_t)0);
+                tmpl.gw2BuildId    = jb.value("gw2_build_id",  0);
                 tmpl.resolved      = jb.value("resolved",      false);
                 if (jb.contains("raw_tab")) tmpl.rawTab = DeserialiseBuildTab(jb["raw_tab"]);
                 // Chat-code data
@@ -564,6 +607,16 @@ void TemplateStore::Save()
     root["item_names"]    = itemNamesJ;
     root["item_rarities"] = itemRaritiesJ;
 
+    json specIconsJ, skillIconsJ, traitIconsJ, itemIconsJ;
+    for (auto& [k, v] : g_SpecIcons)  specIconsJ[std::to_string(k)]  = v;
+    for (auto& [k, v] : g_SkillIcons) skillIconsJ[std::to_string(k)] = v;
+    for (auto& [k, v] : g_TraitIcons) traitIconsJ[std::to_string(k)] = v;
+    for (auto& [k, v] : g_ItemIcons)  itemIconsJ[std::to_string(k)]  = v;
+    root["spec_icons"]  = specIconsJ;
+    root["skill_icons"] = skillIconsJ;
+    root["trait_icons"] = traitIconsJ;
+    root["item_icons"]  = itemIconsJ;
+
     // Build templates
     json buildsArr = json::array();
     for (auto& b : g_Builds)
@@ -574,6 +627,7 @@ void TemplateStore::Save()
         jb["character_name"] = b.characterName;
         jb["profession"]    = b.profession;
         jb["saved_at"]      = b.savedAt;
+        jb["gw2_build_id"]  = b.gw2BuildId;
         jb["resolved"]      = b.resolved;
         jb["raw_tab"]       = SerialiseBuildTab(b.rawTab);
         // Chat-code data
@@ -851,6 +905,39 @@ int TemplateStore::ApiToPalette(const std::string& profession, int apiSkillId)
     for (auto& [palId, apiId] : pit->second)
         if (apiId == apiSkillId) return palId;
     return 0;
+}
+
+std::string TemplateStore::GetSpecIcon(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_SpecIcons.find(id);
+    return (it != g_SpecIcons.end()) ? it->second : std::string{};
+}
+
+std::string TemplateStore::GetSkillIcon(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_SkillIcons.find(id);
+    return (it != g_SkillIcons.end()) ? it->second : std::string{};
+}
+
+std::string TemplateStore::GetTraitIcon(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_TraitIcons.find(id);
+    return (it != g_TraitIcons.end()) ? it->second : std::string{};
+}
+
+std::string TemplateStore::GetItemIcon(int id)
+{
+    std::lock_guard<std::mutex> lk(g_Mx);
+    auto it = g_ItemIcons.find(id);
+    return (it != g_ItemIcons.end()) ? it->second : std::string{};
+}
+
+int TemplateStore::GetCurrentGW2Build()
+{
+    return g_CurrentGW2Build;
 }
 
 std::string TemplateStore::SaveBuildByLabel(StoredBuildTemplate tmpl)

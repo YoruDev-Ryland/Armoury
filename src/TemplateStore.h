@@ -42,7 +42,8 @@ namespace TemplateStore
         uint8_t  revenantLegends[4]  = {};
         uint16_t revenantInactive[6] = {};
 
-        int64_t savedAt = 0;      // Unix timestamp (seconds)
+        int64_t savedAt     = 0;  // Unix timestamp (seconds)
+        int     gw2BuildId  = 0;  // GW2 game build ID at time of save
 
         // True once all IDs have been resolved via background thread
         bool resolved = false;
@@ -147,6 +148,21 @@ namespace TemplateStore
     // API-skill-ID to palette ID lookup for a profession.
     // Returns 0 if not cached or not found.
     int ApiToPalette(const std::string& profession, int apiSkillId);
+
+    // Look up cached icon URL for a specialization (spec background art).
+    std::string GetSpecIcon(int id);
+
+    // Look up cached icon URL for a skill.
+    std::string GetSkillIcon(int id);
+
+    // Look up cached icon URL for a trait.
+    std::string GetTraitIcon(int id);
+
+    // Look up cached icon URL for an item.
+    std::string GetItemIcon(int id);
+
+    // Return the GW2 build ID fetched from /v2/build at last resolve.
+    int GetCurrentGW2Build();
 
     // Queue IDs for background resolution (starts resolve thread if needed).
     void RequestResolve(const std::string& apiKey);
