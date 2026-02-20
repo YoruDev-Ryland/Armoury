@@ -391,9 +391,9 @@ namespace
         //   [spec icon]  [spec name]
         //   indent  │  [tier1: 3 icons stacked]  [tier2: 3 icons]  [tier3: 3 icons]
         // Selected trait = bright + highlight border; unselected = dimmed.
-        constexpr float kSpecIconSz  = 24.f;
-        constexpr float kTraitIconSz = 24.f;   // each trait icon square
-        constexpr float kTierGap     = 8.f;    // horizontal gap between tier columns
+        constexpr float kSpecIconSz  = 32.f;
+        constexpr float kTraitIconSz = 32.f;   // each trait icon square
+        constexpr float kTierGap     = 12.f;   // horizontal gap between tier columns
         constexpr float kTraitSpacing = 2.f;   // vertical gap between stacked icons
 
         bool hasAnySpec = false;

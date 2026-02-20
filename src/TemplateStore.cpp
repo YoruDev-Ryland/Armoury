@@ -253,7 +253,18 @@ namespace
             {
                 for (auto& s : b.rawTab.specs)
                 {
-                    if (s.id && (!g_SpecNames.count(s.id) || !g_SpecIcons.count(s.id) || !g_SpecMajorTraits.count(s.id) || !g_SpecMinorTraits.count(s.id))) specIds.insert(s.id);
+                    if (s.id)
+                    {
+                        if (!g_SpecNames.count(s.id) || !g_SpecIcons.count(s.id) || !g_SpecMajorTraits.count(s.id) || !g_SpecMinorTraits.count(s.id))
+                            specIds.insert(s.id);
+                        else
+                        {
+                            for (int t : g_SpecMajorTraits[s.id])
+                                if (t && (!g_TraitNames.count(t) || !g_TraitIcons.count(t))) traitIds.insert(t);
+                            for (int t : g_SpecMinorTraits[s.id])
+                                if (t && (!g_TraitNames.count(t) || !g_TraitIcons.count(t))) traitIds.insert(t);
+                        }
+                    }
                     for (int t : s.traits)
                         if (t && (!g_TraitNames.count(t) || !g_TraitIcons.count(t))) traitIds.insert(t);
                 }
@@ -302,8 +313,12 @@ namespace
                     for (int i = 0; i < 3; ++i) minorArr[i] = si.minorTraitIds[i];
                 }
                 g_SpecMinorTraits[si.id] = minorArr;
-                // Also add minor traits to traitIds so their icons get fetched
+                // Also add minor and major traits to traitIds so their icons get fetched
                 for (int t : si.minorTraitIds)
+                {
+                    if (t && (!g_TraitNames.count(t) || !g_TraitIcons.count(t))) traitIds.insert(t);
+                }
+                for (int t : si.majorTraitIds)
                 {
                     if (t && (!g_TraitNames.count(t) || !g_TraitIcons.count(t))) traitIds.insert(t);
                 }
