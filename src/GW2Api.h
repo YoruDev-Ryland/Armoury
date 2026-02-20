@@ -38,12 +38,13 @@ namespace GW2Api
 
     struct ItemInfo
     {
-        int         id          = 0;
+        int         id             = 0;
         std::string name;
-        std::string rarity;     // "Exotic", "Ascended", etc.
-        std::string type;       // "Weapon", "Armor", "UpgradeComponent", etc.
+        std::string rarity;        // "Exotic", "Ascended", etc.
+        std::string type;          // "Weapon", "Armor", "UpgradeComponent", etc.
         std::string iconUrl;
         std::string chatLink;
+        int         infixUpgradeId = 0; // details.infix_upgrade.id for items with fixed stats
     };
 
     struct StatsInfo

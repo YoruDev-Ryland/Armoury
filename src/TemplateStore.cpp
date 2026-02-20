@@ -304,7 +304,10 @@ namespace
             for (auto& si : infos) g_SkillNames[si.id] = si.name;
         }
 
-        // Fetch items (upgraded/infusions included)
+        // Fetch items (upgrades/infusions/main pieces included)
+        // Build a map itemId -> infixUpgradeId while we're at it so we can
+        // resolve fixed-stat (crafted) items that have no 'stats' field.
+        std::unordered_map<int,int> itemInfixId;   // itemId -> infix_upgrade id
         if (!itemIds.empty() && !g_ResolveStop)
         {
             auto infos = GW2Api::FetchItemInfos(
@@ -314,10 +317,30 @@ namespace
             {
                 g_ItemNames[ii.id]    = ii.name;
                 g_ItemRarities[ii.id] = ii.rarity;
+                if (ii.infixUpgradeId) itemInfixId[ii.id] = ii.infixUpgradeId;
             }
         }
 
-        // Fetch stats that have no name yet
+        // For equipment pieces that still have no stats (crafted/fixed-stat
+        // items like Zojja's, Suun's, etc.), collect the infix_upgrade IDs
+        // returned above and add them to the stats lookup set.
+        {
+            std::lock_guard<std::mutex> lk(g_Mx);
+            for (auto& e : g_Equipment)
+                for (auto& p : e.rawTab.pieces)
+                    if (p.statsId == 0 && p.statsName.empty())
+                    {
+                        auto it = itemInfixId.find(p.itemId);
+                        if (it != itemInfixId.end() && it->second)
+                        {
+                            p.statsId = it->second; // store so back-fill works below
+                            statsIds.insert(it->second);
+                        }
+                    }
+        }
+
+        // Fetch stats that have no name yet (covers both selectable-stat ascended
+        // pieces and fixed-stat crafted pieces whose ID we just collected above).
         if (!statsIds.empty() && !g_ResolveStop)
         {
             auto infos = GW2Api::FetchStatsInfos(

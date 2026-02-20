@@ -456,6 +456,15 @@ std::vector<GW2Api::ItemInfo> GW2Api::FetchItemInfos(const std::vector<int>& ids
                 item.type     = jstr(ji, "type");
                 item.chatLink = jstr(ji, "chat_link");
                 item.iconUrl  = jstr(ji, "icon");
+                // Fixed-stat items (crafted exotics, some ascended) store their
+                // stat combination under details.infix_upgrade.id rather than
+                // appearing in the equipment-tab 'stats' field.
+                if (ji.contains("details") && ji["details"].is_object())
+                {
+                    auto& det = ji["details"];
+                    if (det.contains("infix_upgrade") && det["infix_upgrade"].is_object())
+                        item.infixUpgradeId = jint(det["infix_upgrade"], "id");
+                }
                 out.push_back(std::move(item));
             }
         }
