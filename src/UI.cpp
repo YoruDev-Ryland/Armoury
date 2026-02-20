@@ -702,7 +702,11 @@ namespace
         ImGui::BeginChild("##detail_pane", ImVec2(0, 0), false);
         bool drew = false;
 
-        if (!s_SelectedBuildId.empty())
+        // Always show what the user last clicked; if that item is linked, show
+        // the combined view.  Only fall back to the other selection if nothing
+        // was clicked yet (e.g. first frame after startup).
+        if (s_LastClickedIsBuild && !s_SelectedBuildId.empty())
+        {
             for (auto& b : builds) if (b.id == s_SelectedBuildId)
             {
                 std::string eid = TemplateStore::GetLinkedEquip(b.id);
@@ -712,8 +716,9 @@ namespace
                 if (!drew) { DrawBuildDetail(b); drew = true; }
                 break;
             }
-
-        if (!drew && !s_SelectedEquipId.empty())
+        }
+        else if (!s_LastClickedIsBuild && !s_SelectedEquipId.empty())
+        {
             for (auto& eq : equips) if (eq.id == s_SelectedEquipId)
             {
                 std::string bid = TemplateStore::GetLinkedBuild(eq.id);
@@ -723,6 +728,7 @@ namespace
                 if (!drew) { DrawEquipDetail(eq); drew = true; }
                 break;
             }
+        }
 
         if (!drew)
             ImGui::TextDisabled("Select a build or equipment set above to view details.");
