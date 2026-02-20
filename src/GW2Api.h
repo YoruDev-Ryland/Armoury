@@ -160,4 +160,8 @@ namespace GW2Api
 
     // Return the current GW2 game build number from /v2/build.  0 on failure.
     int FetchCurrentBuildId();
+
+    // Download raw bytes from any HTTPS URL (e.g. render CDN icons).
+    // Returns empty vector on failure.  Blocking — call from a background thread.
+    std::vector<uint8_t> DownloadBytesFromURL(const std::string& url);
 }

@@ -571,3 +571,68 @@ int GW2Api::FetchCurrentBuildId()
     catch (...) {}
     return 0;
 }
+
+std::vector<uint8_t> GW2Api::DownloadBytesFromURL(const std::string& url)
+{
+    std::vector<uint8_t> out;
+    if (url.empty()) return out;
+
+    // Parse: https://<host>/<path>
+    size_t protEnd = url.find("//");
+    if (protEnd == std::string::npos) return out;
+    size_t hostEnd = url.find('/', protEnd + 2);
+    if (hostEnd == std::string::npos) return out;
+    std::string hostUtf8 = url.substr(protEnd + 2, hostEnd - (protEnd + 2));
+    std::string pathUtf8 = url.substr(hostEnd);
+
+    // Convert to wide
+    auto toWide = [](const std::string& s) -> std::wstring {
+        std::wstring w(s.size(), L'\0');
+        for (size_t i = 0; i < s.size(); ++i) w[i] = (wchar_t)(unsigned char)s[i];
+        return w;
+    };
+
+    HINTERNET hSession = WinHttpOpen(
+        L"Armoury/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return out;
+
+    HINTERNET hConnect = WinHttpConnect(
+        hSession, toWide(hostUtf8).c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return out; }
+
+    HINTERNET hReq = WinHttpOpenRequest(
+        hConnect, L"GET", toWide(pathUtf8).c_str(),
+        nullptr, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!hReq) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return out; }
+
+    if (WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(hReq, nullptr))
+    {
+        DWORD status = 0, statusSize = sizeof(status);
+        WinHttpQueryHeaders(hReq,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            nullptr, &status, &statusSize, nullptr);
+        if (status == 200)
+        {
+            DWORD avail = 0;
+            while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0)
+            {
+                size_t base = out.size();
+                out.resize(base + avail);
+                DWORD read = 0;
+                WinHttpReadData(hReq, out.data() + base, avail, &read);
+                out.resize(base + read);
+            }
+        }
+    }
+
+    WinHttpCloseHandle(hReq);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return out;
+}

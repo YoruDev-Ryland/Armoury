@@ -14,6 +14,11 @@
 #include <sstream>
 #include <cstring>
 #include <ctime>
+#include <unordered_map>
+#include <unordered_set>
+#include <mutex>
+#include <windows.h>
+#include <fstream>
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
 
@@ -90,24 +95,99 @@ static std::string ItemDisplay(int id)
     return "Item #" + std::to_string(id);
 }
 
-// ── Icon texture helpers ──────────────────────────────────────────────────────
+// ── Icon disk-cache helpers ────────────────────────────────────────────────────
+// Icons are downloaded once to <addondir>/icons/ and loaded from disk on
+// every subsequent launch — no re-download needed between game sessions.
 
-// Request (or retrieve) a URL-based texture from Nexus.
-// Returns nullptr while still loading or if URL is empty / APIDefs unavailable.
+static std::string       s_IconsDir;          // set on first use
+static std::mutex        s_IconMx;
+static std::unordered_map<std::string, std::string>  s_IconPathCache;  // url -> local .png path
+static std::unordered_set<std::string>               s_IconDownloading; // urls in-flight
+
+// Return the icons directory, creating it if needed.
+static const std::string& IconsDir()
+{
+    if (!s_IconsDir.empty()) return s_IconsDir;
+    if (!APIDefs) return s_IconsDir;
+    s_IconsDir = std::string(APIDefs->Paths_GetAddonDirectory("Armoury")) + "\\icons";
+    CreateDirectoryA(s_IconsDir.c_str(), nullptr);
+    return s_IconsDir;
+}
+
+// Derive a safe local filename from a URL: take everything after the last '/'.
+static std::string IconFilename(const std::string& url)
+{
+    size_t pos = url.rfind('/');
+    if (pos != std::string::npos && pos + 1 < url.size())
+        return url.substr(pos + 1);
+    // Fallback: sanitise the full URL
+    std::string s = url;
+    for (char& c : s) if (!isalnum((unsigned char)c) && c != '.') c = '_';
+    return s + ".png";
+}
+
+// Return a Nexus ImTextureID for the given GW2 render URL.
+// First call triggers a background download+save; subsequent calls (same
+// session OR future sessions) load straight from the cached .png file.
 static ImTextureID GetIconTexture(const std::string& url)
 {
     if (url.empty() || !APIDefs) return nullptr;
-    // Split "https://host/path" into remote + endpoint
-    size_t protEnd = url.find("//");
-    if (protEnd == std::string::npos) return nullptr;
-    size_t hostEnd = url.find('/', protEnd + 2);
-    if (hostEnd == std::string::npos) return nullptr;
-    std::string remote   = url.substr(0, hostEnd);
-    std::string endpoint = url.substr(hostEnd);
-    Texture_t* tex = APIDefs->Textures_GetOrCreateFromURL(
-        url.c_str(), remote.c_str(), endpoint.c_str());
-    if (!tex || !tex->Resource) return nullptr;
-    return (ImTextureID)tex->Resource;
+
+    // Fast path: already resolved this URL to a local file this session
+    {
+        std::lock_guard<std::mutex> lk(s_IconMx);
+        auto it = s_IconPathCache.find(url);
+        if (it != s_IconPathCache.end())
+        {
+            Texture_t* tex = APIDefs->Textures_GetOrCreateFromFile(
+                url.c_str(), it->second.c_str());
+            return (tex && tex->Resource) ? (ImTextureID)tex->Resource : nullptr;
+        }
+    }
+
+    // Check if the file already exists on disk from a previous session
+    const std::string& dir = IconsDir();
+    if (!dir.empty())
+    {
+        std::string path = dir + "\\" + IconFilename(url);
+        DWORD attr = GetFileAttributesA(path.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES)
+        {
+            // File exists — register and load
+            std::lock_guard<std::mutex> lk(s_IconMx);
+            s_IconPathCache[url] = path;
+            Texture_t* tex = APIDefs->Textures_GetOrCreateFromFile(
+                url.c_str(), path.c_str());
+            return (tex && tex->Resource) ? (ImTextureID)tex->Resource : nullptr;
+        }
+
+        // Not on disk yet — kick off a download if not already in progress
+        {
+            std::lock_guard<std::mutex> lk(s_IconMx);
+            if (s_IconDownloading.count(url)) return nullptr; // already downloading
+            s_IconDownloading.insert(url);
+        }
+
+        std::thread([url, path]{
+            auto bytes = GW2Api::DownloadBytesFromURL(url);
+            if (!bytes.empty())
+            {
+                // Write to disk
+                std::ofstream f(path, std::ios::binary);
+                if (f) f.write(reinterpret_cast<const char*>(bytes.data()),
+                               (std::streamsize)bytes.size());
+                f.close();
+                // Register so next frame picks it up
+                std::lock_guard<std::mutex> lk(s_IconMx);
+                s_IconPathCache[url] = path;
+            }
+            {
+                std::lock_guard<std::mutex> lk(s_IconMx);
+                s_IconDownloading.erase(url);
+            }
+        }).detach();
+    }
+    return nullptr;
 }
 
 // Draw an icon at the given square size, or a grey rounded placeholder.
