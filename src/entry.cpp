@@ -123,7 +123,7 @@ extern "C" __declspec(dllexport) AddonDefinition_t* GetAddonDef()
     s_AddonDef.Signature   = 0xAA4D0001; // Unique ID — change before publishing if needed
     s_AddonDef.APIVersion  = NEXUS_API_VERSION;
     s_AddonDef.Name        = "Armoury";
-    s_AddonDef.Version     = { 1, 0, 0, 0 };
+    s_AddonDef.Version     = { 1, 0, 0, 1 };
     s_AddonDef.Author      = "YoruDev-Ryland";
     s_AddonDef.Description = "Save and manage equipment and traitline templates, "
                              "like Blish HUD Template Manager — for Nexus.";
