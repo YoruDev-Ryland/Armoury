@@ -19,8 +19,6 @@
 #include <windows.h>
 #include <fstream>
 
-// ── Colour helpers ────────────────────────────────────────────────────────────
-
 static ImU32 RarityColor(const std::string& rarity)
 {
     if (rarity == "Junk")        return IM_COL32(170, 170, 170, 255);
@@ -44,8 +42,6 @@ static ImVec4 RarityColorV4(const std::string& rarity)
         1.f);
 }
 
-// ── Profession colour ─────────────────────────────────────────────────────────
-
 static ImVec4 ProfessionColor(const std::string& prof)
 {
     if (prof == "Guardian")    return ImVec4(0.28f, 0.55f, 0.96f, 1.0f);
@@ -59,8 +55,6 @@ static ImVec4 ProfessionColor(const std::string& prof)
     if (prof == "Revenant")    return ImVec4(0.61f, 0.20f, 0.20f, 1.0f);
     return ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
 }
-
-// ── Name resolution helpers ───────────────────────────────────────────────────
 
 static std::string SkillDisplay(int id)
 {
@@ -94,24 +88,13 @@ static std::string ItemDisplay(int id)
     return "Item #" + std::to_string(id);
 }
 
-// ── Icon cache ────────────────────────────────────────────────────────────────
-//
-// Download thread:   fetches PNG bytes, saves to disk, pushes into s_PendingUploads
-// Render thread:     each frame drains s_PendingUploads via FlushPendingIcons(),
-//                    calls Textures_GetOrCreateFromMemory (D3D11 upload must be
-//                    on the render thread).
-//
-// On subsequent sessions the file already exists → Textures_GetOrCreateFromFile
-// (async one-shot load, also render-thread-safe).
-
 struct PendingIcon { std::string url; std::vector<uint8_t> bytes; };
 
 static std::string                   s_IconsDir;
 static std::mutex                    s_IconMx;
-static std::unordered_set<std::string> s_IconDownloading;   // urls in-flight
-static std::vector<PendingIcon>        s_PendingUploads;    // ready for GPU upload
+static std::unordered_set<std::string> s_IconDownloading;
+static std::vector<PendingIcon>        s_PendingUploads;
 
-// Return (and lazily create) the icons directory.
 static const std::string& IconsDir()
 {
     if (!s_IconsDir.empty()) return s_IconsDir;
@@ -121,7 +104,6 @@ static const std::string& IconsDir()
     return s_IconsDir;
 }
 
-// Filename for a URL = last path component.
 static std::string IconFilename(const std::string& url)
 {
     size_t pos = url.rfind('/');
@@ -132,8 +114,6 @@ static std::string IconFilename(const std::string& url)
     return s + ".png";
 }
 
-// Called ONCE PER FRAME from the render thread before any icon draws.
-// Drains s_PendingUploads and uploads each to Nexus.
 static void FlushPendingIcons()
 {
     if (!APIDefs) return;
@@ -151,12 +131,10 @@ static void FlushPendingIcons()
     }
 }
 
-// Return an ImTextureID for a GW2 render CDN URL, or nullptr while loading.
 static ImTextureID GetIconTexture(const std::string& url)
 {
     if (url.empty() || !APIDefs) return nullptr;
 
-    // Already registered and uploaded — fastest path (zero allocations).
     Texture_t* tex = APIDefs->Textures_Get(url.c_str());
     if (tex && tex->Resource) return (ImTextureID)tex->Resource;
 
@@ -164,8 +142,6 @@ static ImTextureID GetIconTexture(const std::string& url)
     if (dir.empty()) return nullptr;
     std::string path = dir + "\\" + IconFilename(url);
 
-    // File on disk from a previous session → ask Nexus to load it (async).
-    // Nexus deduplicates by id, so this is a no-op after the first call.
     DWORD attr = GetFileAttributesA(path.c_str());
     if (attr != INVALID_FILE_ATTRIBUTES)
     {
@@ -173,7 +149,6 @@ static ImTextureID GetIconTexture(const std::string& url)
         return (tex && tex->Resource) ? (ImTextureID)tex->Resource : nullptr;
     }
 
-    // Not on disk — fire a background download.
     {
         std::lock_guard<std::mutex> lk(s_IconMx);
         if (s_IconDownloading.count(url)) return nullptr;
@@ -184,12 +159,10 @@ static ImTextureID GetIconTexture(const std::string& url)
         auto bytes = GW2Api::DownloadBytesFromURL(url);
         if (!bytes.empty())
         {
-            // Save to disk for next session.
             std::ofstream f(path, std::ios::binary);
             if (f) f.write(reinterpret_cast<const char*>(bytes.data()),
                            (std::streamsize)bytes.size());
 
-            // Queue GPU upload — MUST happen on the render thread (see FlushPendingIcons).
             std::lock_guard<std::mutex> lk(s_IconMx);
             s_PendingUploads.push_back({url, std::move(bytes)});
         }
@@ -202,7 +175,6 @@ static ImTextureID GetIconTexture(const std::string& url)
     return nullptr;
 }
 
-// Draw an icon at the given square size, or a grey rounded placeholder.
 static void IconImage(const std::string& url, float size)
 {
     ImTextureID tex = GetIconTexture(url);
@@ -219,35 +191,28 @@ static void IconImage(const std::string& url, float size)
     }
 }
 
-// ── UI state ──────────────────────────────────────────────────────────────────
-
 namespace
 {
-    // Character list
     std::vector<std::string>  s_Characters;
     std::atomic_bool          s_CharactersFetching{false};
     std::string               s_CharactersStatus;
 
     std::string               s_SelectedChar;
 
-    // Selected template IDs
     std::string               s_SelectedBuildId;
     std::string               s_SelectedEquipId;
-    bool                      s_LastClickedIsBuild = true; // for rename/delete target
+    bool                      s_LastClickedIsBuild = true;
 
-    // ── Delete confirmation ───────────────────────────────────────────────────
     bool        s_ShowDeleteBuildConfirm = false;
     bool        s_ShowDeleteEquipConfirm = false;
     std::string s_PendingDeleteId;
     std::string s_PendingDeleteLabel;
 
-    // ── Rename modal ──────────────────────────────────────────────────────────
     bool        s_ShowRenameBuild = false;
     bool        s_ShowRenameEquip = false;
     std::string s_RenameTargetId;
     char        s_RenameBuf[128]  = {};
 
-    // ── Import from GW2 state ─────────────────────────────────────────────────
     enum class ImportPhase { Idle, Fetching, Ready, Error };
 
     bool                               s_ShowImportBuild  = false;
@@ -257,7 +222,6 @@ namespace
     std::vector<GW2Api::BuildTab>      s_ImportedBuildTabs;
     std::vector<GW2Api::EquipmentTab>  s_ImportedEquipTabs;
 
-    // ── Import from code state ─────────────────────────────────────────────────
     bool        s_ShowImportCode    = false;
     char        s_CodeBuf[512]      = {};
     std::string s_CodeParseStatus;
@@ -267,9 +231,6 @@ namespace
     uint8_t     s_ParsedSpecChoices[3][3] = {};
     uint16_t    s_ParsedPaletteSkills[10] = {};
     char        s_CodeLabelBuf[128]       = {};
-
-    // Slot helpers
-    // ── Background fetch helpers ──────────────────────────────────────────────
 
     void FetchCharactersAsync()
     {
@@ -324,8 +285,6 @@ namespace
         }).detach();
     }
 
-    // ── Helper: current character name ────────────────────────────────────────
-
     std::string ActiveChar()
     {
         if (g_Settings.ShowOnlyCurrentChar && MumbleIdent)
@@ -333,15 +292,10 @@ namespace
         return s_SelectedChar;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Build detail view ─────────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-
     void DrawBuildDetail(const TemplateStore::StoredBuildTemplate& b)
     {
         auto& tab = b.rawTab;
 
-        // ── Header: profession + chat code ────────────────────────────────────
         ImGui::TextColored(ProfessionColor(b.profession), "%s", b.profession.c_str());
         if (!b.chatCode.empty())
         {
@@ -360,7 +314,6 @@ namespace
             ImGui::TextDisabled("(chat code pending resolution...)");
         }
 
-        // ── Save date + GW2 build stamp ───────────────────────────────────────
         if (b.savedAt > 0 || b.gw2BuildId > 0)
         {
             if (b.savedAt > 0)
@@ -386,15 +339,10 @@ namespace
 
         ImGui::Separator();
 
-        // ── Specialization traitlines ─────────────────────────────────────────
-        // Each spec is its own full-width row (stacked vertically):
-        //   [spec icon]  [spec name]
-        //   indent  │  [tier1: 3 icons stacked]  [tier2: 3 icons]  [tier3: 3 icons]
-        // Selected trait = bright + highlight border; unselected = dimmed.
         constexpr float kSpecIconSz  = 32.f;
-        constexpr float kTraitIconSz = 32.f;   // each trait icon square
-        constexpr float kTierGap     = 12.f;   // horizontal gap between tier columns
-        constexpr float kTraitSpacing = 2.f;   // vertical gap between stacked icons
+        constexpr float kTraitIconSz = 32.f;
+        constexpr float kTierGap     = 12.f;
+        constexpr float kTraitSpacing = 2.f;
 
         bool hasAnySpec = false;
         for (int si = 0; si < 3; ++si) if (tab.specs[si].id) { hasAnySpec = true; break; }
@@ -408,7 +356,6 @@ namespace
 
                 ImGui::PushID(si + 5000);
 
-                // ── Spec header: icon + name ──────────────────────────────────
                 {
                     ImTextureID specIco = GetIconTexture(TemplateStore::GetSpecIcon(spec.id));
                     if (specIco)
@@ -427,8 +374,6 @@ namespace
                                        SpecDisplay(spec.id).c_str());
                 }
 
-                // ── Trait columns ─────────────────────────────────────────────
-                // Three tier-columns, each with a minor trait and 3 small icons stacked vertically.
                 auto majorTraits = TemplateStore::GetSpecMajorTraits(spec.id);
                 auto minorTraits = TemplateStore::GetSpecMinorTraits(spec.id);
 
@@ -439,7 +384,6 @@ namespace
                 {
                     if (tier > 0) ImGui::SameLine(0.f, kTierGap);
 
-                    // 1. Render minor trait
                     ImGui::BeginGroup();
                     float minorYOffset = kTraitIconSz + kTraitSpacing;
                     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + minorYOffset);
@@ -449,7 +393,7 @@ namespace
                         ? GetIconTexture(TemplateStore::GetTraitIcon(minorTraitId))
                         : nullptr;
                     
-                    ImGui::PushID(tier * 10 + 9); // 9 for minor
+                    ImGui::PushID(tier * 10 + 9);
                     if (minorIco)
                     {
                         ImGui::Image(minorIco, ImVec2(kTraitIconSz, kTraitIconSz));
@@ -467,13 +411,11 @@ namespace
 
                     ImGui::SameLine(0.f, kTierGap);
 
-                    // 2. Render major traits
                     ImGui::BeginGroup();
                     for (int choice = 0; choice < 3; ++choice)
                     {
                         if (choice > 0)
                         {
-                            // push each icon down by kTraitSpacing manually
                             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kTraitSpacing);
                         }
 
@@ -522,9 +464,6 @@ namespace
             ImGui::Spacing();
         }
 
-        // ── Skill bar ─────────────────────────────────────────────────────────
-        // Five skill slots evenly distributed across the full available width.
-        // Sizes recalculate every frame so they adapt to window resizing.
         struct SkillSlot { int id; const char* label; ImVec4 color; };
         SkillSlot slots[5] = {
             { tab.skills.heal,         "Heal",    ImVec4(0.30f,0.78f,0.30f,1.f) },
@@ -537,9 +476,7 @@ namespace
         {
             float avail  = ImGui::GetContentRegionAvail().x;
             float gapW   = ImGui::GetStyle().ItemSpacing.x;
-            // 5 slots with 4 gaps between them
             float slotW  = std::floor((avail - gapW * 4.f) / 5.f);
-            // Icon fills the slot width but capped so it doesn't become absurd
             float iconSz = std::min(slotW - 4.f, 52.f);
             iconSz = std::max(iconSz, 20.f);
 
@@ -549,7 +486,6 @@ namespace
                 ImGui::PushID(i + 9000);
                 ImGui::BeginGroup();
 
-                // Role label: centred in slot
                 {
                     float lw = ImGui::CalcTextSize(sl.label).x;
                     ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
@@ -557,7 +493,6 @@ namespace
                     ImGui::TextColored(sl.color, "%s", sl.label);
                 }
 
-                // Icon (or grey placeholder): centred in slot
                 {
                     float iconOff = std::max(0.f, (slotW - iconSz) * 0.5f);
                     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + iconOff);
@@ -575,7 +510,6 @@ namespace
                     }
                 }
 
-                // Skill name: centred, word-wrapped to slot width
                 {
                     std::string name = sl.id ? SkillDisplay(sl.id) : std::string("(none)");
                     float nw = ImGui::CalcTextSize(name.c_str(), nullptr, false, slotW).x;
@@ -607,22 +541,16 @@ namespace
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Equipment detail view ─────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-
     void DrawEquipDetail(const TemplateStore::StoredEquipmentTemplate& e)
     {
         auto& tab = e.rawTab;
 
-        // Find a piece by API slot name
         auto FindPiece = [&](const char* slot) -> const GW2Api::EquipmentPiece*
         {
             for (auto& p : tab.pieces) if (p.slot == slot) return &p;
             return nullptr;
         };
 
-        // Render item cell with rarity colour
         auto ItemCell = [&](int id)
         {
             std::string rar = TemplateStore::GetItemRarity(id);
@@ -632,21 +560,18 @@ namespace
                 ImGui::TextUnformatted(ItemDisplay(id).c_str());
         };
 
-        // Render a text cell — grey dash when empty
         auto TextCell = [&](const std::string& s)
         {
             if (s.empty()) ImGui::TextDisabled("-");
             else           ImGui::TextUnformatted(s.c_str());
         };
 
-        // Upgrade name by index; empty if absent
         auto UpgradeName = [&](const GW2Api::EquipmentPiece& p, int idx) -> std::string
         {
             if (idx < (int)p.upgradeIds.size()) return ItemDisplay(p.upgradeIds[idx]);
             return {};
         };
 
-        // Infusions: newline-joined string
         auto InfusionStr = [&](const GW2Api::EquipmentPiece& p) -> std::string
         {
             std::string out;
@@ -655,9 +580,6 @@ namespace
             return out;
         };
 
-        // ── Armour & Accessories ──────────────────────────────────────────────
-        // GW2 API slot names: Helm, Shoulders, Coat, Gloves, Leggings, Boots,
-        //                     Backpack, Accessory1/2, Amulet, Ring1/2
         struct ArmorRow { const char* apiSlot; const char* label; };
         constexpr ArmorRow kArmorOrder[] = {
             {"Helm",       "Head"},
@@ -703,7 +625,6 @@ namespace
             ImGui::EndTable();
         }
 
-        // ── Weapons ───────────────────────────────────────────────────────────
         struct WeapRow { const char* apiSlot; const char* label; };
         constexpr WeapRow kWeapOrder[] = {
             {"WeaponA1", "Main (set A)"},
@@ -732,7 +653,6 @@ namespace
                 const GW2Api::EquipmentPiece* piece = FindPiece(row.apiSlot);
                 if (!piece) continue;
                 anyWeapon = true;
-                // Two-handed weapons have sigil 1 at index 0 and sigil 2 at index 1
                 std::string sigils = UpgradeName(*piece, 0);
                 std::string s2     = UpgradeName(*piece, 1);
                 if (!s2.empty()) { if (!sigils.empty()) sigils += "\n"; sigils += s2; }
@@ -752,10 +672,6 @@ namespace
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Combined (linked) build + equipment detail ────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-
     void DrawCombinedDetail(
         const TemplateStore::StoredBuildTemplate&     b,
         const TemplateStore::StoredEquipmentTemplate& e)
@@ -771,10 +687,6 @@ namespace
         ImGui::Spacing();
         DrawEquipDetail(e);
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Character panel ───────────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
 
     void DrawCharacterPanel(float panelWidth)
     {
@@ -823,17 +735,12 @@ namespace
         ImGui::EndChild();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Main (right) panel — unified builds + equipment ───────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-
     void DrawMainPanel()
     {
         const std::string charName = ActiveChar();
         const bool hasChar = !charName.empty();
         const bool hasKey  = !g_Settings.ApiKey.empty();
 
-        // ── Toolbar ───────────────────────────────────────────────────────────
         if (hasChar && hasKey)
         {
             if (ImGui::Button("Import Builds##gw2b"))
@@ -876,7 +783,6 @@ namespace
         auto builds = TemplateStore::GetBuilds(charName);
         auto equips = TemplateStore::GetEquipment(charName);
 
-        // ── Side-by-side Equipment | Builds ───────────────────────────────────
         const float listH = 200.f;
         if (ImGui::BeginTable("##dual_lists", 2,
             ImGuiTableFlags_BordersInnerV, ImVec2(0, listH)))
@@ -885,7 +791,6 @@ namespace
             ImGui::TableSetupColumn("Builds",    ImGuiTableColumnFlags_WidthStretch, 1.f);
             ImGui::TableNextRow();
 
-            // ── Equipment column ──────────────────────────────────────────────
             ImGui::TableSetColumnIndex(0);
             ImGui::TextDisabled("Equipment");
             ImGui::Separator();
@@ -914,7 +819,6 @@ namespace
             }
             ImGui::EndChild();
 
-            // ── Builds column ─────────────────────────────────────────────────
             ImGui::TableSetColumnIndex(1);
             ImGui::TextDisabled("Builds");
             ImGui::Separator();
@@ -978,7 +882,6 @@ namespace
             ImGui::EndTable();
         }
 
-        // ── Controls: Rename / Delete / Link / Unlink ─────────────────────────
         {
             std::string selId, selLabel;
             if (s_LastClickedIsBuild && !s_SelectedBuildId.empty())
@@ -1034,13 +937,9 @@ namespace
 
         ImGui::Separator();
 
-        // ── Detail pane ───────────────────────────────────────────────────────
         ImGui::BeginChild("##detail_pane", ImVec2(0, 0), false);
         bool drew = false;
 
-        // Always show what the user last clicked; if that item is linked, show
-        // the combined view.  Only fall back to the other selection if nothing
-        // was clicked yet (e.g. first frame after startup).
         if (s_LastClickedIsBuild && !s_SelectedBuildId.empty())
         {
             for (auto& b : builds) if (b.id == s_SelectedBuildId)
@@ -1072,10 +971,6 @@ namespace
         ImGui::EndChild();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Popup: Import Builds from GW2 ────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-
     void DrawImportBuildPopup()
     {
         if (!s_ShowImportBuild) return;
@@ -1100,7 +995,6 @@ namespace
             }
             else if (s_ImportPhase == ImportPhase::Ready)
             {
-                // Import All — overwrites existing builds with the same name
                 if (ImGui::Button("Import All  (overwrites same-named builds)##iab"))
                 {
                     for (auto& tab : s_ImportedBuildTabs)
@@ -1158,10 +1052,6 @@ namespace
             s_ImportedBuildTabs.clear();
         }
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Popup: Import Equipment from GW2 ─────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
 
     void DrawImportEquipPopup()
     {
@@ -1237,10 +1127,6 @@ namespace
             s_ImportedEquipTabs.clear();
         }
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Popup: Import from code ───────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
 
     void DrawImportCodePopup()
     {
@@ -1321,7 +1207,6 @@ namespace
                     tmpl.characterName = charName;
                     tmpl.profession    = s_ParsedProfession;
                     tmpl.label         = s_CodeLabelBuf;
-                    // Strip surrounding whitespace from code before storing
                     {
                         std::string raw = s_CodeBuf;
                         while (!raw.empty() && isspace((unsigned char)raw.front())) raw.erase(raw.begin());
@@ -1348,10 +1233,6 @@ namespace
 
         if (!open) s_ShowImportCode = false;
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Modal: rename ─────────────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
 
     void DrawRenameModal(bool forBuild)
     {
@@ -1385,10 +1266,6 @@ namespace
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ── Modal: delete confirmation ────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-
     void DrawDeleteModal(bool forBuild)
     {
         const char* popupId = forBuild ? "Delete Build?##armoury_del_b"
@@ -1421,14 +1298,10 @@ namespace
         }
     }
 
-} // anonymous namespace
-
-// ── Public: Render ────────────────────────────────────────────────────────────
+}
 
 void UI::Render()
 {
-    // Drain any icons that finished downloading since the last frame.
-    // Must run on the render thread before any Textures_GetOrCreateFromMemory calls.
     FlushPendingIcons();
 
     if (!g_Settings.ShowWindow) return;
@@ -1446,7 +1319,6 @@ void UI::Render()
 
         if (g_Settings.ShowOnlyCurrentChar)
         {
-            // No character panel — title shows current char from MumbleLink
             if (MumbleIdent && MumbleIdent->Name[0] != '\0')
                 ImGui::TextDisabled("Character: %s", MumbleIdent->Name);
             else
@@ -1461,7 +1333,6 @@ void UI::Render()
             DrawCharacterPanel(kLeftWidth);
             ImGui::SameLine();
 
-            // Vertical separator (manual — SeparatorEx is internal API)
             {
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 float  h = ImGui::GetContentRegionAvail().y;
@@ -1489,13 +1360,8 @@ void UI::Render()
     DrawDeleteModal(false);
 }
 
-// ── Public: RenderOptions ─────────────────────────────────────────────────────
-
 void UI::RenderOptions()
 {
-    // NOTE: Do NOT call ImGui::Begin/End here — Nexus calls this inside its own
-    //       Options window.  Just write widgets directly.
-
     ImGui::TextDisabled("GW2 API Key");
     ImGui::TextDisabled("Requires 'characters' and 'builds' permissions.");
 

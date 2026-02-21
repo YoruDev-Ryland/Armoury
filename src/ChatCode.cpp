@@ -2,8 +2,6 @@
 #include <cstring>
 #include <algorithm>
 
-// ── Base64 ────────────────────────────────────────────────────────────────────
-
 static const char kB64[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -14,7 +12,7 @@ static int b64val(char c)
     if (c >= '0' && c <= '9') return c - '0' + 52;
     if (c == '+') return 62;
     if (c == '/') return 63;
-    return 0; // '=' treated as 0
+    return 0;
 }
 
 std::string ChatCode::B64Encode(const std::vector<uint8_t>& data)
@@ -40,7 +38,6 @@ bool ChatCode::B64Decode(const std::string& in, std::vector<uint8_t>& out)
 {
     out.clear();
 
-    // Strip whitespace
     std::string s;
     s.reserve(in.size());
     for (char c : in) if (!isspace((unsigned char)c)) s += c;
@@ -59,8 +56,6 @@ bool ChatCode::B64Decode(const std::string& in, std::vector<uint8_t>& out)
     }
     return true;
 }
-
-// ── Profession helpers ────────────────────────────────────────────────────────
 
 uint8_t ChatCode::ProfCode(const std::string& p)
 {
@@ -93,15 +88,12 @@ std::string ChatCode::ProfName(uint8_t code)
     }
 }
 
-// ── Parse ─────────────────────────────────────────────────────────────────────
-
 bool ChatCode::ParseBuildCode(const std::string& raw,
                                std::string& outProfession,
                                int          outSpecIds[3],
                                uint8_t      outSpecChoices[3][3],
                                uint16_t     outPaletteSkills[10])
 {
-    // Strip surrounding "[& ... ]" if present
     std::string s = raw;
     {
         auto lb = s.find("[&");
@@ -112,20 +104,18 @@ bool ChatCode::ParseBuildCode(const std::string& raw,
             if (rb != std::string::npos) s = s.substr(0, rb);
         }
     }
-    // Trim whitespace
+
     while (!s.empty() && isspace((unsigned char)s.front())) s.erase(s.begin());
     while (!s.empty() && isspace((unsigned char)s.back()))  s.pop_back();
 
     std::vector<uint8_t> bytes;
     if (!B64Decode(s, bytes)) return false;
 
-    // Minimum: 1 (type) + 1 (prof) + 6 (specs) + 20 (skills) + 16 (prof-specific) = 44
     if (bytes.size() < 44 || bytes[0] != 0x0D) return false;
 
     outProfession = ProfName(bytes[1]);
     if (outProfession.empty()) return false;
 
-    // 3 spec pairs [2..7]
     for (int s = 0; s < 3; ++s)
     {
         outSpecIds[s] = bytes[2 + s*2];
@@ -135,7 +125,6 @@ bool ChatCode::ParseBuildCode(const std::string& raw,
         outSpecChoices[s][2] = (tb >> 4) & 0x03;
     }
 
-    // 10 uint16 palette skills [8..27]
     for (int i = 0; i < 10; ++i)
     {
         uint16_t lo = bytes[8  + i*2];
@@ -145,8 +134,6 @@ bool ChatCode::ParseBuildCode(const std::string& raw,
 
     return true;
 }
-
-// ── Encode ────────────────────────────────────────────────────────────────────
 
 std::string ChatCode::EncodeBuildCode(
     const std::string& profession,
@@ -162,7 +149,6 @@ std::string ChatCode::EncodeBuildCode(
     bytes[0] = 0x0D;
     bytes[1] = ProfCode(profession);
 
-    // 3 spec pairs
     for (int s = 0; s < 3; ++s)
     {
         bytes[2 + s*2] = (uint8_t)(specIds[s] & 0xFF);
@@ -173,14 +159,12 @@ std::string ChatCode::EncodeBuildCode(
         bytes[3 + s*2] = tb;
     }
 
-    // 10 palette skill pairs [8..27]
     for (int i = 0; i < 10; ++i)
     {
         bytes[8  + i*2] = (uint8_t)(paletteSkills[i] & 0xFF);
         bytes[9  + i*2] = (uint8_t)((paletteSkills[i] >> 8) & 0xFF);
     }
 
-    // Profession-specific [28..43]
     if (profession == "Ranger" && rangerPets)
     {
         bytes[28] = rangerPets[0];
@@ -203,14 +187,8 @@ std::string ChatCode::EncodeBuildCode(
             }
         }
     }
-
-    // bytes[44] = weapon count = 0
-    // bytes[45] = skill-variant count = 0
-
     return "[&" + B64Encode(bytes) + "]";
 }
-
-// ── Trait-choice helpers ──────────────────────────────────────────────────────
 
 void ChatCode::DeriveChoices(
     const GW2Api::BuildTab& tab,
@@ -227,7 +205,7 @@ void ChatCode::DeriveChoices(
         auto it = specMajorTraits.find(specId);
         if (it == specMajorTraits.end()) continue;
 
-        const auto& maj = it->second;  // 9 entries: tier0[0..2], tier1[3..5], tier2[6..8]
+        const auto& maj = it->second;
 
         for (int tier = 0; tier < 3; ++tier)
         {
@@ -238,7 +216,7 @@ void ChatCode::DeriveChoices(
             {
                 if (maj[tier*3 + pos] == traitId)
                 {
-                    outChoices[s][tier] = (uint8_t)(pos + 1);  // 1=top,2=mid,3=bot
+                    outChoices[s][tier] = (uint8_t)(pos + 1);
                     break;
                 }
             }
@@ -265,7 +243,7 @@ void ChatCode::ApplyChoices(
         const auto& maj = it->second;
         for (int tier = 0; tier < 3; ++tier)
         {
-            uint8_t choice = choices[s][tier];  // 1/2/3
+            uint8_t choice = choices[s][tier];
             if (choice < 1 || choice > 3) continue;
             int idx = tier*3 + (choice - 1);
             if (idx < 9) tab.specs[s].traits[tier] = maj[idx];
