@@ -1072,5 +1072,5 @@ void TemplateStore::RequestResolve(const std::string& apiKey)
         g_ResolveThread.join();
 
     g_ResolveThread = std::thread(ResolveWorker, apiKey);
-    g_ResolveThread.detach();   // fire-and-forget (g_ResolvePending tracks it)
+    // Do NOT detach — Shutdown() joins this thread so it must remain joinable.
 }
