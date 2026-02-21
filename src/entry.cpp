@@ -72,9 +72,9 @@ static void AddonLoad(AddonAPI_t* aApi)
         ProcessKeybind,
         "(null)"); // user assigns binding in Nexus keybind settings
 
-    // ── Load quick-access icon (resource ID 101 embedded in the DLL) ─────────
-    aApi->Textures_GetOrCreateFromResource("ICON_ARMOURY",       101, Self);
-    aApi->Textures_GetOrCreateFromResource("ICON_ARMOURY_HOVER", 101, Self);
+    // ── Load quick-access icon (resource ID 103 embedded in the DLL) ─────────
+    aApi->Textures_GetOrCreateFromResource("ICON_ARMOURY",       103, Self);
+    aApi->Textures_GetOrCreateFromResource("ICON_ARMOURY_HOVER", 103, Self);
 
     // ── Add quick-access shortcut ─────────────────────────────────────────────
     aApi->QuickAccess_Add(
